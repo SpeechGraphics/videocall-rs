@@ -71,7 +71,8 @@ impl Default for DelayConfig {
             quantile: 0.97,
             forget_factor: 0.9993,
             start_forget_weight: Some(2.0),
-            resample_interval_ms: Some(500),
+            // resample_interval_ms: Some(500),
+            resample_interval_ms: None,
             max_history_ms: 2000,
             base_minimum_delay_ms: 0,
             base_maximum_delay_ms: 2000,
@@ -171,30 +172,32 @@ impl RelativeArrivalDelayTracker {
 
     /// Calculates the relative arrival delay of packets in the history.
     ///
-    /// Returns the 97th percentile of positive jitter values in the recent history.
-    /// Negative jitter (early arrivals) is clamped to 0 since we only care about
-    /// buffering for late packets.
+    /// This effectively computes the accumulated delay of packets relative
+    /// to the packet preceding the history window. If the running sum ever
+    /// goes below zero, it is reset, meaning the reference packet is moved.
+    ///
+    /// Note on behavior:
+    /// - This function is **sensitive to positive tail jitter**:
+    ///     * Positive delays near the end of the history accumulate.
+    ///     * Positive delays near the beginning may be partially cancelled by
+    ///       subsequent negative delays.
+    /// - Negative delays are mostly ignored because the running sum resets
+    ///   to zero whenever it becomes negative.
     pub fn calculate_relative_packet_arrival_delay(&self) -> i32 {
-        if self.delay_history.is_empty() {
+        if self.delay_history.len() < 2 {
             return 0;
         }
 
-        // Collect positive jitter values (late arrivals)
-        let mut positive_delays: Vec<i32> = self
-            .delay_history
-            .iter()
-            .map(|d| d.iat_delay_ms.max(0))
-            .collect();
+        let mut relative_delay: i32 = 0;
 
-        if positive_delays.is_empty() {
-            return 0;
+        for delay in &self.delay_history {
+            relative_delay += delay.iat_delay_ms;
+            if relative_delay < 0 {
+                relative_delay = 0; // reset if sum goes below zero
+            }
         }
 
-        positive_delays.sort_unstable();
-
-        // Return 97th percentile
-        let index = ((positive_delays.len() - 1) as f64 * self.config.quantile) as usize;
-        positive_delays[index]
+        relative_delay
     }
 }
 
