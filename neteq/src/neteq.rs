@@ -1545,12 +1545,11 @@ mod tests {
             insert_audio(&mut neteq, 10);
         }
 
-        // Consume two frames without adding new audio
-        let _ = neteq.get_audio().unwrap();
-        let _ = neteq.get_audio().unwrap();
-        reset_filtered_level(&mut neteq);
+        // Set target delay to 500ms
+        neteq.delay_manager.set_base_minimum_delay(500);
+        neteq.delay_manager.set_base_maximum_delay(500);
 
-        // Expect PreemtiveExpand,TimeStrectchBuffer,TimeStrectchBuffer a couple times
+        // Expect PreemtiveExpand+TimeStrectchBuffer+TimeStrectchBuffer a couple times
         for _ in 0..3 {
             let _ = neteq.get_audio().unwrap();
             assert_eq!(neteq.last_operation, Operation::PreemptiveExpand);
