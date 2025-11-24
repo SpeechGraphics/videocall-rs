@@ -31,6 +31,7 @@ pub mod expand;
 pub mod histogram;
 pub mod neteq;
 pub mod packet;
+pub mod rtp_header_tracker;
 pub mod signal;
 pub mod statistics;
 pub mod time_stretch;
