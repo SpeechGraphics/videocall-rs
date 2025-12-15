@@ -93,4 +93,5 @@ required-features = ["native", "audio_files"]
 name = "dashboard_server"
 required-features = ["native"]
 
-
+[lib]
+crate-type=["rlib", "cdylib"]
