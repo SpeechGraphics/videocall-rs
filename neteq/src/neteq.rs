@@ -1027,10 +1027,7 @@ pub extern "C" fn neteq_get_audio_frame(
     neteq_ptr: *mut c_void,
     ret_buf: *mut f32,
 ) {
-    let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
-    // force an Err result, skipping real get_audio entirely
-    let result: Result<(), &str> = Err("forced error");
-    result.expect("get_audio");
+    panic!("forced panic to verify FFI crash");
     
     // let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
     // // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
