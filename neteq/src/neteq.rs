@@ -1027,7 +1027,7 @@ pub extern "C" fn neteq_get_audio_frame(
     neteq_ptr: *mut c_void,
     ret_buf: *mut f32,
 ) {
-    panic!("forced panic to verify FFI crash");
+    panic!("forced panic neteq_get_audio_frame to verify FFI crash");
     
     // let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
     // // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
@@ -1055,17 +1055,19 @@ pub extern "C" fn neteq_insert_audio_packet(
     payload: *mut u8,
     payload_len: u32,
 ) {
-    let ssrc = 12345;
-    let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
-    let vec: Vec<u8>;
-    unsafe {
-        let len: usize = payload_len.try_into().unwrap();
-        let slice = std::slice::from_raw_parts(payload, len);
-        vec = slice.to_vec();
-    }
-    let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
-    let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
-    neteq.lock().unwrap().insert_packet(p).expect("insert_packet");
+    panic!("forced panic neteq_insert_audio_packet to verify FFI crash");
+
+//     let ssrc = 12345;
+//     let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
+//     let vec: Vec<u8>;
+//     unsafe {
+//         let len: usize = payload_len.try_into().unwrap();
+//         let slice = std::slice::from_raw_parts(payload, len);
+//         vec = slice.to_vec();
+//     }
+//     let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
+//     let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+//     neteq.lock().unwrap().insert_packet(p).expect("insert_packet");
 }
 
 #[cfg(test)]
