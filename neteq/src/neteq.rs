@@ -1028,19 +1028,24 @@ pub extern "C" fn neteq_get_audio_frame(
     ret_buf: *mut f32,
 ) {
     let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
-    // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
-    // handles errors with "fill silence and return"
-    let frame = neteq.lock().unwrap().get_audio().expect("get_audio");
-    let mut m = frame.samples.len();
-    if m != 480 {
-        println!("unexpected sample len {}", m);
-        m = min(m, 480);
-    }
-    for i in 0..m {
-        unsafe {
-          *ret_buf.add(i) = frame.samples[i];
-        }
-    }
+    // force an Err result, skipping real get_audio entirely
+    let result: Result<(), &str> = Err("forced error");
+    result.expect("get_audio");
+    
+    // let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+    // // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
+    // // handles errors with "fill silence and return"
+    // let frame = neteq.lock().unwrap().get_audio().expect("get_audio");
+    // let mut m = frame.samples.len();
+    // if m != 480 {
+    //     println!("unexpected sample len {}", m);
+    //     m = min(m, 480);
+    // }
+    // for i in 0..m {
+    //     unsafe {
+    //       *ret_buf.add(i) = frame.samples[i];
+    //     }
+    // }
 }
 
 // Insert 20ms of 1-channel 48kHz RTP Opus audio.
