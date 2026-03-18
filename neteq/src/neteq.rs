@@ -1022,27 +1022,87 @@ pub extern "C" fn neteq_destroy(
 
 // Returns 10ms audio frame of signed float32
 // ret_buf must be 480*sizeof(float) bytes
+// #[no_mangle]
+// pub extern "C" fn neteq_get_audio_frame(
+//     neteq_ptr: *mut c_void,
+//     ret_buf: *mut f32,
+// ) {
+//     let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+//     // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
+//     // handles errors with "fill silence and return"
+//     let frame = neteq.lock().unwrap().get_audio().expect("get_audio");
+//     let mut m = frame.samples.len();
+//     if m != 480 {
+//         println!("unexpected sample len {}", m);
+//         m = min(m, 480);
+//     }
+//     for i in 0..m {
+//         unsafe {
+//           *ret_buf.add(i) = frame.samples[i];
+//         }
+//     }
+// }
+
 #[no_mangle]
 pub extern "C" fn neteq_get_audio_frame(
     neteq_ptr: *mut c_void,
     ret_buf: *mut f32,
 ) {
-    panic!("forced panic neteq_get_audio_frame to verify FFI crash");
-    
-    // let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
-    // // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
-    // // handles errors with "fill silence and return"
-    // let frame = neteq.lock().unwrap().get_audio().expect("get_audio");
-    // let mut m = frame.samples.len();
-    // if m != 480 {
-    //     println!("unexpected sample len {}", m);
-    //     m = min(m, 480);
-    // }
-    // for i in 0..m {
-    //     unsafe {
-    //       *ret_buf.add(i) = frame.samples[i];
-    //     }
-    // }
+    // helper to fill silence so we always return valid audio data to Go
+    let write_silence = || {
+        for i in 0..480 {
+            unsafe { *ret_buf.add(i) = 0.0; }
+        }
+    };
+
+    let result = std::panic::catch_unwind(|| {
+        let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+        
+        match neteq.lock() {
+            Err(e) => {
+                eprintln!("neteq mutex poisoned in get_audio: {:?}", e);
+                return None;
+            }
+            Ok(mut guard) => {
+                match guard.get_audio() {
+                    Err(e) => {
+                        eprintln!("get_audio error: {:?}", e);
+                        return None;
+                    }
+                    Ok(frame) => {
+                        return Some(frame);
+                    }
+                }
+            }
+        }
+    });
+
+    match result {
+        Err(_) => {
+            // panic was caught - log and write silence
+            eprintln!("panic caught in neteq_get_audio_frame");
+            write_silence();
+        }
+        Ok(None) => {
+            // recoverable error - write silence
+            write_silence();
+        }
+        Ok(Some(frame)) => {
+            // normal path - copy samples to output buffer
+            let mut m = frame.samples.len();
+            if m != 480 {
+                eprintln!("unexpected sample len {}", m);
+                m = m.min(480);
+            }
+            for i in 0..m {
+                unsafe { *ret_buf.add(i) = frame.samples[i]; }
+            }
+            // if frame was short, fill remainder with silence
+            for i in m..480 {
+                unsafe { *ret_buf.add(i) = 0.0; }
+            }
+        }
+    }
 }
 
 // Insert 20ms of 1-channel 48kHz RTP Opus audio.
@@ -1055,19 +1115,17 @@ pub extern "C" fn neteq_insert_audio_packet(
     payload: *mut u8,
     payload_len: u32,
 ) {
-    panic!("forced panic neteq_insert_audio_packet to verify FFI crash");
-
-//     let ssrc = 12345;
-//     let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
-//     let vec: Vec<u8>;
-//     unsafe {
-//         let len: usize = payload_len.try_into().unwrap();
-//         let slice = std::slice::from_raw_parts(payload, len);
-//         vec = slice.to_vec();
-//     }
-//     let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
-//     let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
-//     neteq.lock().unwrap().insert_packet(p).expect("insert_packet");
+    let ssrc = 12345;
+    let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
+    let vec: Vec<u8>;
+    unsafe {
+        let len: usize = payload_len.try_into().unwrap();
+        let slice = std::slice::from_raw_parts(payload, len);
+        vec = slice.to_vec();
+    }
+    let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
+    let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+    neteq.lock().unwrap().insert_packet(p).expect("insert_packet");
 }
 
 #[cfg(test)]
