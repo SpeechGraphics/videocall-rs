@@ -1107,6 +1107,27 @@ pub extern "C" fn neteq_get_audio_frame(
 
 // Insert 20ms of 1-channel 48kHz RTP Opus audio.
 // payload is variable length because this is compressed Opus (not PCM).
+// #[no_mangle]
+// pub extern "C" fn neteq_insert_audio_packet(
+//     neteq_ptr: *mut c_void,
+//     sequence_number: u16,
+//     timestamp: u32,
+//     payload: *mut u8,
+//     payload_len: u32,
+// ) {
+//     let ssrc = 12345;
+//     let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
+//     let vec: Vec<u8>;
+//     unsafe {
+//         let len: usize = payload_len.try_into().unwrap();
+//         let slice = std::slice::from_raw_parts(payload, len);
+//         vec = slice.to_vec();
+//     }
+//     let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
+//     let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+//     neteq.lock().unwrap().insert_packet(p).expect("insert_packet");
+// }
+
 #[no_mangle]
 pub extern "C" fn neteq_insert_audio_packet(
     neteq_ptr: *mut c_void,
@@ -1115,17 +1136,50 @@ pub extern "C" fn neteq_insert_audio_packet(
     payload: *mut u8,
     payload_len: u32,
 ) {
-    let ssrc = 12345;
-    let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
-    let vec: Vec<u8>;
-    unsafe {
-        let len: usize = payload_len.try_into().unwrap();
-        let slice = std::slice::from_raw_parts(payload, len);
-        vec = slice.to_vec();
+    let result = std::panic::catch_unwind(|| {
+        // convert payload length - should never fail on 64-bit but handle it anyway
+        let len: usize = match payload_len.try_into() {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("invalid payload_len {}: {:?}", payload_len, e);
+                return;
+            }
+        };
+
+        let vec: Vec<u8> = unsafe {
+            let slice = std::slice::from_raw_parts(payload, len);
+            slice.to_vec()
+        };
+
+        let hdr = RtpHeader::new(sequence_number, timestamp, 12345, 111, false);
+        let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
+
+        let neteq: &mut Mutex<NetEq> = unsafe { 
+            &mut *(neteq_ptr as *mut Mutex<NetEq>) 
+        };
+
+        match neteq.lock() {
+            Err(e) => {
+                eprintln!("neteq mutex poisoned in insert_packet: {:?}", e);
+            }
+            Ok(mut guard) => {
+                match guard.insert_packet(p) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("insert_packet error seq={} ts={}: {:?}", 
+                            sequence_number, timestamp, e);
+                        // dropped packet - NetEq will handle the gap with concealment
+                    }
+                }
+            }
+        }
+    });
+
+    if result.is_err() {
+        eprintln!("panic caught in neteq_insert_audio_packet seq={} ts={}", 
+            sequence_number, timestamp);
+        // nothing to return - dropped packet is recoverable
     }
-    let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
-    let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
-    neteq.lock().unwrap().insert_packet(p).expect("insert_packet");
 }
 
 #[cfg(test)]
