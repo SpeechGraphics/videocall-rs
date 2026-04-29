@@ -21,12 +21,18 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use web_time::{Duration, Instant};
 
+use crate::codec::OpusDecoder;
+use std::cmp::min;
+use std::ffi::c_void;
+use std::sync::Mutex;
+
 use crate::buffer::{BufferReturnCode, PacketBuffer, SmartFlushConfig};
 use crate::buffer_level_filter::BufferLevelFilter;
 use crate::delay_manager::{DelayConfig, DelayManager};
 use crate::expand::ExpandFactory;
 use crate::expand::{Expand, ExpandPhase};
-use crate::packet::AudioPacket;
+use crate::packet::{AudioPacket, RtpHeader};
+use crate::rtp_header_tracker::RtpHeaderTracker;
 use crate::statistics::{
     LifetimeStatistics, NetworkStatistics, StatisticsCalculator, TimeStretchOperation,
 };
@@ -149,6 +155,8 @@ pub struct AudioFrame {
     pub speech_type: SpeechType,
     /// Voice activity detection result
     pub vad_activity: bool,
+    /// The Rtp header of the input packet associated with this output frame
+    pub input_rtp_header: Option<RtpHeader>,
 }
 
 /// Speech type classification
@@ -169,6 +177,7 @@ impl AudioFrame {
             samples_per_channel,
             speech_type: SpeechType::Normal,
             vad_activity: false,
+            input_rtp_header: None,
         }
     }
 
@@ -187,6 +196,7 @@ pub struct NetEq {
     accelerate: Box<dyn TimeStretcher + Send>,
     preemptive_expand: Box<dyn TimeStretcher + Send>,
     expand: Box<Expand>,
+    rtp_header_tracker: RtpHeaderTracker,
     last_decode_timestamp: Option<u32>,
     output_frame_size_samples: usize,
     _muted: bool,
@@ -205,7 +215,7 @@ pub struct NetEq {
     packets_per_sec_snapshot: u32,
     // A buffer for already time streched samples. Separate from leftover_samples to avoid
     // double time-streching.
-    leftover_time_stretched_samples: Vec<f32>,
+    leftover_time_stretched_frames: VecDeque<AudioFrame>,
     /// Number of samples added by time-stretching operations (matches WebRTC sample_memory_,
     /// but with clearer meaning for positive/negative values).
     timestretch_added_samples: i32,
@@ -264,6 +274,7 @@ impl NetEq {
             accelerate,
             preemptive_expand,
             expand,
+            rtp_header_tracker: RtpHeaderTracker::new(),
             last_decode_timestamp: None,
             output_frame_size_samples,
             _muted: false,
@@ -276,7 +287,7 @@ impl NetEq {
             packets_received_this_second: 0,
             last_packets_second_instant: Instant::now(),
             packets_per_sec_snapshot: 0,
-            leftover_time_stretched_samples: Vec::new(),
+            leftover_time_stretched_frames: VecDeque::new(),
             timestretch_added_samples: 0,
         })
     }
@@ -293,6 +304,7 @@ impl NetEq {
                 match decoder.decode(&packet.payload) {
                     Ok(pcm_samples) => {
                         let sample_count = pcm_samples.len();
+                        self.rtp_header_tracker.record(packet.header, sample_count);
                         self.bypass_audio_queue.extend(pcm_samples);
                         log::trace!("Bypass mode: decoded {sample_count} samples");
                     }
@@ -349,6 +361,7 @@ impl NetEq {
                 self.config.channels,
                 self.output_frame_size_samples / self.config.channels as usize,
             );
+            frame.input_rtp_header = self.rtp_header_tracker.current_header();
 
             let samples_needed = self.output_frame_size_samples;
             let mut filled = 0;
@@ -358,6 +371,7 @@ impl NetEq {
                 frame.samples[filled] = self.bypass_audio_queue.pop_front().unwrap();
                 filled += 1;
             }
+            self.rtp_header_tracker.consume(filled);
 
             // Fill remaining with silence if needed
             while filled < samples_needed {
@@ -500,7 +514,7 @@ impl NetEq {
         self.packets_received_this_second = 0;
         self.packets_per_sec_snapshot = 0;
         self.last_packets_second_instant = Instant::now();
-        self.leftover_time_stretched_samples.clear();
+        self.leftover_time_stretched_frames.clear();
         self.timestretch_added_samples = 0;
     }
 
@@ -531,7 +545,7 @@ impl NetEq {
         );
         let high_limit = std::cmp::max(target_level_samples, low_limit + 20 * samples_per_ms);
 
-        if !self.leftover_time_stretched_samples.is_empty() {
+        if !self.leftover_time_stretched_frames.is_empty() {
             return Ok(Operation::TimeStretchBuffer);
         }
 
@@ -590,6 +604,15 @@ impl NetEq {
     }
 
     fn decode_normal(&mut self, frame: &mut AudioFrame) -> Result<()> {
+        self.decode_frame(frame)?;
+
+        frame.input_rtp_header = self.rtp_header_tracker.current_header();
+        self.rtp_header_tracker.consume(frame.samples.len());
+
+        Ok(())
+    }
+
+    fn decode_frame(&mut self, frame: &mut AudioFrame) -> Result<()> {
         // Log buffer status at entry
         log::trace!(
             "decode_normal: entering with buffer={}ms, packets={}",
@@ -638,6 +661,9 @@ impl NetEq {
                         v
                     };
 
+                    self.rtp_header_tracker
+                        .record(packet.header.clone(), packet_samples.len());
+
                     let available = packet_samples.len();
                     let need_now = samples_needed - filled;
                     let to_copy = need_now.min(available);
@@ -682,11 +708,12 @@ impl NetEq {
     fn decode_accelerate(&mut self, frame: &mut AudioFrame, fast_mode: bool) -> Result<()> {
         if !self.config.for_test_no_time_stretching {
             let available_samples = self.current_buffer_size_samples();
-            let mut output_len: usize = 0;
+            let mut output_frame_count: usize = 0;
             let mut required_samples: usize = 0;
             for i in (1..=3).rev() {
                 // Use 30ms if available
-                output_len = self.output_frame_size_samples * i;
+                output_frame_count = i;
+                let output_len = self.output_frame_size_samples * i;
                 if fast_mode {
                     required_samples = (output_len as f32 * 2.0).ceil() as usize
                 } else {
@@ -704,19 +731,24 @@ impl NetEq {
                 required_samples,
             );
 
-            self.decode_normal(&mut extended_frame)?;
+            self.decode_frame(&mut extended_frame)?;
 
             // Will output up to 30ms output
-            let mut output =
-                AudioFrame::new(self.config.sample_rate, self.config.channels, output_len);
+            let mut output = AudioFrame::new(
+                self.config.sample_rate,
+                self.config.channels,
+                output_frame_count * self.output_frame_size_samples / self.config.channels as usize,
+            );
 
             // Apply accelerate algorithm
             let _result =
                 self.accelerate
                     .process(&extended_frame.samples, &mut output.samples, fast_mode);
 
-            // Put back unused samples
             let used_input_samples = self.accelerate.get_used_input_samples();
+            let samples_removed = used_input_samples as i32 - output.samples.len() as i32;
+
+            // Put back unused samples
             if extended_frame.samples.len() > used_input_samples {
                 self.leftover_samples.splice(
                     0..0,
@@ -724,26 +756,26 @@ impl NetEq {
                 );
             }
 
-            // Fill frame with as much data as it fits
-            let frame_len = frame.samples.len();
-            frame.samples.clone_from_slice(&output.samples[..frame_len]);
+            // Split and store frames
+            self.store_time_stretch_result(
+                output,
+                output_frame_count,
+                used_input_samples,
+                SpeechType::Normal,
+                extended_frame.vad_activity, // Preserve VAD from decoded audio
+            );
 
-            // Store the remaining data to be returned as later frames
-            self.leftover_time_stretched_samples
-                .extend_from_slice(&output.samples[frame_len..]);
+            // Return the first frame
+            self.read_time_stretch_result(frame);
 
             // Track time-stretching for buffer level filtering (matches WebRTC pattern)
             // WebRTC sets sample_memory to available samples for time-stretching (line 1304)
             // extended_frame has more samples than we need, representing available data
-            let samples_removed = used_input_samples as i32 - output.samples.len() as i32;
             self.timestretch_added_samples -= samples_removed / self.config.channels as i32;
 
             // Update statistics
             self.statistics
                 .time_stretch_operation(TimeStretchOperation::Accelerate, samples_removed as u64);
-
-            frame.speech_type = SpeechType::Normal;
-            frame.vad_activity = extended_frame.vad_activity; // Preserve VAD from decoded audio
         } else {
             self.decode_normal(frame)?;
         }
@@ -757,16 +789,17 @@ impl NetEq {
             let mut extended_frame = AudioFrame::new(
                 self.config.sample_rate,
                 self.config.channels,
-                (frame.samples_per_channel as f32 * 3.0) as usize,
+                frame.samples_per_channel * 3,
             );
 
-            self.decode_normal(&mut extended_frame)?;
+            self.decode_frame(&mut extended_frame)?;
 
+            let output_frame_count = 3;
             // get output of same size as input
             let mut output = AudioFrame::new(
                 self.config.sample_rate,
                 self.config.channels,
-                (frame.samples_per_channel as f32 * 3.0) as usize,
+                frame.samples_per_channel * output_frame_count,
             );
 
             // Apply preemptive expand
@@ -774,8 +807,10 @@ impl NetEq {
                 self.preemptive_expand
                     .process(&extended_frame.samples, &mut output.samples, false);
 
-            // Put back unused samples
             let used_input_samples = self.preemptive_expand.get_used_input_samples();
+            let samples_added = output.samples.len() as i32 - used_input_samples as i32;
+
+            // Put back unused samples
             if extended_frame.samples.len() > used_input_samples {
                 self.leftover_samples.splice(
                     0..0,
@@ -783,18 +818,21 @@ impl NetEq {
                 );
             }
 
-            // fill frame with first half of data
-            let frame_len = frame.samples.len();
-            frame.samples.clone_from_slice(&output.samples[..frame_len]);
+            // Split and store frames
+            self.store_time_stretch_result(
+                output,
+                output_frame_count,
+                used_input_samples,
+                SpeechType::Normal,
+                extended_frame.vad_activity, // Preserve VAD from decoded audio
+            );
 
-            // store the other half for the next frame
-            self.leftover_time_stretched_samples
-                .extend_from_slice(&output.samples[frame_len..]);
+            // Return the first frame
+            self.read_time_stretch_result(frame);
 
             // Track time-stretching for buffer level filtering (matches WebRTC pattern)
             // WebRTC sets sample_memory to available samples for time-stretching (line 1304)
             // For preemptive expand, we had normal frame samples available
-            let samples_added = output.samples.len() as i32 - used_input_samples as i32;
             self.timestretch_added_samples += samples_added / self.config.channels as i32;
 
             // Update statistics
@@ -802,9 +840,6 @@ impl NetEq {
                 TimeStretchOperation::PreemptiveExpand,
                 samples_added as u64,
             );
-
-            frame.speech_type = SpeechType::Normal;
-            frame.vad_activity = extended_frame.vad_activity; // Preserve VAD from decoded audio
         } else {
             self.decode_normal(frame)?;
         }
@@ -813,17 +848,7 @@ impl NetEq {
     }
 
     fn return_time_stretch_buffer(&mut self, frame: &mut AudioFrame) -> Result<()> {
-        if !self.leftover_time_stretched_samples.is_empty() {
-            let to_copy = frame.samples.len();
-            frame
-                .samples
-                .copy_from_slice(&self.leftover_time_stretched_samples[..to_copy]);
-            self.leftover_time_stretched_samples.drain(..to_copy);
-
-            // These are leftover samples from previously decoded audio
-            frame.speech_type = SpeechType::Normal;
-            frame.vad_activity = true;
-        }
+        self.read_time_stretch_result(frame);
 
         Ok(())
     }
@@ -844,7 +869,8 @@ impl NetEq {
             samples_required,
         );
 
-        self.decode_normal(&mut input)?;
+        self.decode_frame(&mut input)?;
+        frame.input_rtp_header = self.rtp_header_tracker.current_header();
 
         self.expand
             .process(&input.samples, &mut frame.samples, phase);
@@ -855,6 +881,8 @@ impl NetEq {
             self.leftover_samples
                 .splice(0..0, input.samples[used_input_samples..].iter().cloned());
         }
+
+        self.rtp_header_tracker.consume(used_input_samples);
 
         // Update statistics
         self.statistics
@@ -904,7 +932,7 @@ impl NetEq {
     pub fn current_buffer_size_samples(&self) -> usize {
         self.packet_buffer.num_samples_in_buffer()
             + self.leftover_samples.len()
-            + self.leftover_time_stretched_samples.len()
+            + self.leftover_time_stretched_frames.len() * self.output_frame_size_samples
     }
 
     /// Register a decoder for a given RTP payload type.
@@ -914,6 +942,46 @@ impl NetEq {
         decoder: Box<dyn crate::codec::AudioDecoder + Send>,
     ) {
         self.decoders.insert(payload_type, decoder);
+    }
+
+    fn store_time_stretch_result(
+        &mut self,
+        output: AudioFrame,
+        frame_count: usize,
+        used_input_samples: usize,
+        speech_type: SpeechType,
+        vad_activity: bool,
+    ) {
+        let mut used_input_samples_remaining = used_input_samples;
+        for i in 0..frame_count {
+            let mut output_part = AudioFrame::new(
+                self.config.sample_rate,
+                self.config.channels,
+                self.output_frame_size_samples / self.config.channels as usize,
+            );
+            output_part.input_rtp_header = self.rtp_header_tracker.current_header();
+            output_part.samples.clone_from_slice(
+                &output.samples
+                    [self.output_frame_size_samples * i..self.output_frame_size_samples * (i + 1)],
+            );
+
+            output_part.speech_type = speech_type;
+            output_part.vad_activity = vad_activity;
+
+            self.leftover_time_stretched_frames.push_back(output_part);
+
+            // fancy way of dividing used_input_samples by frame_count, without rounding errors
+            let used_samples_this_frame = used_input_samples_remaining / (frame_count - i);
+            used_input_samples_remaining -= used_samples_this_frame;
+
+            self.rtp_header_tracker.consume(used_samples_this_frame);
+        }
+    }
+
+    fn read_time_stretch_result(&mut self, frame: &mut AudioFrame) {
+        if let Some(f) = self.leftover_time_stretched_frames.pop_front() {
+            frame.clone_from(&f);
+        }
     }
 }
 
@@ -929,6 +997,78 @@ fn simple_random() -> f32 {
     x ^= x << 17;
     RNG_STATE.store(x, Ordering::Relaxed);
     ((x as u32) >> 16) as f32 / 65536.0
+}
+
+#[no_mangle]
+pub extern "C" fn neteq_create() -> *mut c_void {
+    let config = NetEqConfig {
+        sample_rate: 48000,
+        channels: 1,
+        max_packets_in_buffer: 50,
+        max_delay_ms: 500,
+        min_delay_ms: 20,
+        for_test_no_time_stretching: false,
+        ..Default::default()
+    };
+    let neteq = Box::new(Mutex::new(NetEq::new(config).expect("new")));
+    let dec = Box::new(OpusDecoder::new(48000, 1).expect("reg"));
+    neteq.lock().unwrap().register_decoder(111, dec);
+    let ptr: *mut Mutex<NetEq> = Box::into_raw(neteq);
+    ptr as *mut c_void
+}
+
+#[no_mangle]
+pub extern "C" fn neteq_destroy(neteq_ptr: *mut c_void) {
+    unsafe {
+        drop(Box::from_raw(neteq_ptr as *mut Mutex<NetEq>));
+    }
+}
+
+// Returns 10ms audio frame of signed float32
+// ret_buf must be 480*sizeof(float) bytes
+#[no_mangle]
+pub extern "C" fn neteq_get_audio_frame(neteq_ptr: *mut c_void, ret_buf: *mut f32) {
+    let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+    // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
+    // handles errors with "fill silence and return"
+    let frame = neteq.lock().unwrap().get_audio().expect("get_audio");
+    let mut m = frame.samples.len();
+    if m != 480 {
+        println!("unexpected sample len {}", m);
+        m = min(m, 480);
+    }
+    for i in 0..m {
+        unsafe {
+            *ret_buf.add(i) = frame.samples[i];
+        }
+    }
+}
+
+// Insert 20ms of 1-channel 48kHz RTP Opus audio.
+// payload is variable length because this is compressed Opus (not PCM).
+#[no_mangle]
+pub extern "C" fn neteq_insert_audio_packet(
+    neteq_ptr: *mut c_void,
+    sequence_number: u16,
+    timestamp: u32,
+    payload: *mut u8,
+    payload_len: u32,
+) {
+    let ssrc = 12345;
+    let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
+    let vec: Vec<u8>;
+    unsafe {
+        let len: usize = payload_len.try_into().unwrap();
+        let slice = std::slice::from_raw_parts(payload, len);
+        vec = slice.to_vec();
+    }
+    let p = AudioPacket::new(hdr, vec, 48000, 1, 20);
+    let neteq: &mut Mutex<NetEq> = unsafe { &mut *(neteq_ptr as *mut Mutex<NetEq>) };
+    neteq
+        .lock()
+        .unwrap()
+        .insert_packet(p)
+        .expect("insert_packet");
 }
 
 #[cfg(test)]

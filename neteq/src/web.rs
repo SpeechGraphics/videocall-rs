@@ -22,6 +22,7 @@
 use crate::{codec::UnifiedOpusDecoder, AudioPacket, NetEq, NetEqConfig, RtpHeader};
 #[cfg(feature = "matomo-logger")]
 use matomo_logger::worker as matomo_worker;
+use serde::Serialize;
 use serde_wasm_bindgen;
 use wasm_bindgen::prelude::*;
 
@@ -31,6 +32,15 @@ pub struct WebNetEq {
     sample_rate: u32,
     channels: u8,
     additional_delay_ms: u32,
+}
+
+#[derive(Serialize)]
+struct WebAudioPacket<'a> {
+    payload: &'a [f32],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq_no: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<u32>,
 }
 
 #[wasm_bindgen]
@@ -112,6 +122,48 @@ impl WebNetEq {
         let frame = neteq.get_audio().map_err(Self::map_err)?;
         let out = js_sys::Float32Array::from(frame.samples.as_slice());
         Ok(out)
+    }
+
+    /// Get 10ms of decoded PCM directly from NetEq as a JS object:
+    /// {
+    ///   payload: Float32Array,
+    ///   seq_no?: number,
+    ///   timestamp?: number
+    /// }
+    #[wasm_bindgen]
+    pub fn get_audio_packet(&self) -> Result<JsValue, JsValue> {
+        let mut neteq_ref = self.neteq.borrow_mut();
+        let neteq = neteq_ref
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("NetEq not initialized. Call init() first."))?;
+
+        let frame = neteq.get_audio().map_err(Self::map_err)?;
+
+        // Convert samples to Float32Array
+        let payload = js_sys::Float32Array::from(frame.samples.as_slice());
+
+        // Extract optional RTP header fields
+        let (seq_no, timestamp) = if let Some(h) = frame.input_rtp_header {
+            (Some(h.sequence_number), Some(h.timestamp))
+        } else {
+            (None, None)
+        };
+
+        // Build the serializable struct
+        let response = WebAudioPacket {
+            payload: frame.samples.as_slice(),
+            seq_no,
+            timestamp,
+        };
+
+        // Serialize to JsValue
+        let js_obj = serde_wasm_bindgen::to_value(&response)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        // Overwrite payload with actual Float32Array (serde can't produce TypedArrays)
+        js_sys::Reflect::set(&js_obj, &"payload".into(), &payload)?;
+
+        Ok(js_obj)
     }
 
     /// Get current NetEq statistics as a JS object.
