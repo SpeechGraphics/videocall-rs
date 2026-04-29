@@ -185,19 +185,36 @@ impl WebNetEq {
 
 #[wasm_bindgen(js_name = initNetEq)]
 pub fn init_net_eq() {
-    // Initialize worker-side logger bridge: forward WARN+ to main thread (Matomo)
-    // Keep console at INFO for local visibility inside the workers
     #[cfg(all(feature = "matomo-logger", target_arch = "wasm32"))]
     {
         use log::LevelFilter;
+        use wasm_bindgen::{closure::Closure, JsCast, JsValue};
 
-        if let Err(_e) = matomo_worker::init_with_bridge(LevelFilter::Info, LevelFilter::Debug, {
-            // The bridge expects the object as 'arguments[0]'
-            js_sys::Function::new_no_args("self.postMessage(arguments[0]);")
-        }) {
-            use web_sys::console;
+        let callback = Closure::wrap(Box::new(move |arg: JsValue| {
+            let global = js_sys::global();
 
-            console::error_1(&"[neteq-worker] Failed to initialize matomo worker bridge".into());
+            if let Ok(pm) = js_sys::Reflect::get(&global, &JsValue::from_str("postMessage")) {
+                if let Ok(pm) = pm.dyn_into::<js_sys::Function>() {
+                    let _ = pm.call1(&global, &arg);
+                }
+            }
+        }) as Box<dyn FnMut(JsValue)>);
+
+        // Convert Closure → owned js_sys::Function
+        let func: js_sys::Function = callback
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+
+        if let Err(_e) =
+            matomo_worker::init_with_bridge(LevelFilter::Info, LevelFilter::Debug, func)
+        {
+            web_sys::console::error_1(
+                &"[neteq-worker] Failed to initialize matomo worker bridge".into(),
+            );
         }
+
+        // Keep closure alive
+        callback.forget();
     }
 }
