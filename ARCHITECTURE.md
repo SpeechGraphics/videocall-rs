@@ -28,11 +28,18 @@ graph TD
 
 ## Key Components
 
+- **actix-api:** Rust-based backend server using Actix Web framework
+- **videocall-types:** Shared data types and protocol definitions
+
 ### 1. Client Applications
 
-- **Web Client**: Built with Yew (Rust-to-WebAssembly framework)
+- **Web Client**: Built with Dioxus (Rust-to-WebAssembly framework)
+  - **`dioxus-ui`** Web frontend built with the Dioxus framework and compiled to WebAssembly
+  - **`videocall-client`** Client library for native integration
 - **CLI Client**: Native Rust client for headless devices
+  - **`videocall-cli`** Command-line interface for headless video streaming
 - **Mobile Clients**: Native mobile applications (in development)
+  - **`videocall-sdk`**
 
 ### 2. Transport Servers
 
@@ -109,10 +116,15 @@ All communication in videocall.rs follows a consistent message format defined by
 // From protobuf definitions
 message PacketWrapper {
   enum PacketType {
-    RSA_PUB_KEY = 0;
-    AES_KEY = 1;
-    MEDIA = 2;
-    CONNECTION = 3;
+    PACKET_TYPE_UNKNOWN = 0;
+    RSA_PUB_KEY = 1;
+    AES_KEY = 2;
+    MEDIA = 3;
+    CONNECTION = 4;
+    DIAGNOSTICS = 5;
+    HEALTH = 6;
+    MEETING = 7;
+    SESSION_ASSIGNED = 8;
   }
   PacketType packet_type = 1;
   string email = 2;
@@ -122,10 +134,9 @@ message PacketWrapper {
 
 Inside the `data` field, different packet types are serialized based on the `packet_type`:
 
-- **RSA_PUB_KEY**: Contains an RSA public key for initial E2EE key exchange
-- **AES_KEY**: Contains an AES encryption key encrypted with the recipient's RSA public key
-- **MEDIA**: Contains encrypted media data (audio/video frames)
+- **MEDIA**: Contains media data (audio/video frames)
 - **CONNECTION**: Contains information about the meeting being joined
+- **MEETING**: Contains meeting lifecycle events (participant admitted, rejected, waiting room updated, meeting activated)
 
 For media packets specifically, the structure is:
 
@@ -359,7 +370,7 @@ graph TD
     B --> H[external-dns]
     
     C --> I[videocall-website]
-    C --> J[rustlemania-ui]
+    C --> J[videocall-ui]
     C --> K[rustlemania-websocket]
     C --> L[rustlemania-webtransport]
     C --> M[matomo]
@@ -377,7 +388,7 @@ graph TD
 2. **Application Components**
    - **rustlemania-websocket**: Deploys the Actix API server for WebSocket connections
    - **rustlemania-webtransport**: Deploys the WebTransport server
-   - **rustlemania-ui**: Deploys the Yew-based frontend application
+   - **videocall-ui**: Deploys the Dioxus-based frontend application
    - **videocall-website**: Deploys the marketing website
    - **matomo**: Deploys analytics tools for usage tracking
 
@@ -428,7 +439,7 @@ ingress:
 
 2. **Application Deployment**:
    ```
-   helm upgrade --install rustlemania-ui ./helm/rustlemania-ui
+   helm upgrade --install videocall-ui ./helm/videocall-ui
    helm upgrade --install rustlemania-websocket ./helm/rustlemania-websocket
    helm upgrade --install rustlemania-webtransport ./helm/rustlemania-webtransport
    ```

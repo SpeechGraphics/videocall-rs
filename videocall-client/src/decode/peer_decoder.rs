@@ -38,8 +38,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 use videocall_codecs::decoder::WasmDecoder;
-use videocall_codecs::frame::{FrameBuffer, FrameType, VideoFrame as CodecVideoFrame};
+use videocall_codecs::frame::{FrameBuffer, FrameCodec, FrameType, VideoFrame as CodecVideoFrame};
 use videocall_types::protos::media_packet::MediaPacket;
+use videocall_types::protos::media_packet::VideoCodec;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -135,7 +136,7 @@ impl VideoPeerDecoder {
         };
 
         let wasm_decoder = videocall_codecs::decoder::WasmDecoder::new_with_video_frame_callback(
-            videocall_codecs::decoder::VideoCodec::VP9,
+            videocall_codecs::decoder::VideoCodec::Vp9Profile0Level10Bit8,
             Box::new(on_video_frame),
         );
 
@@ -220,15 +221,47 @@ impl VideoPeerDecoder {
     pub fn flush(&self) {
         self.decoder.flush()
     }
+
+    /// No-op decoder for unit tests — avoids requiring WebCodecs / worker link tags.
+    #[cfg(test)]
+    pub(crate) fn noop() -> Self {
+        struct NoopDecoder;
+        impl VideoFrameDecoder for NoopDecoder {
+            fn push_frame(&self, _: FrameBuffer) {}
+            fn is_waiting_for_keyframe(&self) -> bool {
+                true
+            }
+            fn flush(&self) {}
+        }
+        Self {
+            decoder: Box::new(NoopDecoder),
+            canvas_renderer: Rc::new(RefCell::new(None)),
+        }
+    }
 }
 
 impl PeerDecode for VideoPeerDecoder {
     fn decode(&mut self, packet: &Arc<MediaPacket>) -> anyhow::Result<DecodeStatus> {
         if let Some(video_metadata) = packet.video_metadata.as_ref() {
+            // Convert protobuf VideoCodec to internal FrameCodec
+            let frame_codec = match video_metadata.codec.enum_value() {
+                Ok(VideoCodec::VP8) => FrameCodec::Vp8,
+                Ok(VideoCodec::VP9_PROFILE0_LEVEL10_8BIT) => FrameCodec::Vp9Profile0Level10Bit8,
+                Ok(VideoCodec::VIDEO_CODEC_UNSPECIFIED) | Err(_) => {
+                    // Skip decoding for unknown codec (e.g., older clients)
+                    log::warn!("Skipping video frame with unknown codec");
+                    return Ok(DecodeStatus {
+                        _rendered: false,
+                        first_frame: false,
+                    });
+                }
+            };
+
             let video_frame = CodecVideoFrame {
                 sequence_number: video_metadata.sequence,
                 timestamp: packet.timestamp,
                 frame_type: self.get_frame_type(packet),
+                codec: frame_codec,
                 data: packet.data.clone(),
             };
 

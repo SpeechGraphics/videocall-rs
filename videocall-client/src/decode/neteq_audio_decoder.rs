@@ -1,4 +1,10 @@
+use crate::adaptive_quality_constants::{
+    AUDIO_RED_FORMAT, AUDIO_RED_SEQ_HISTORY_SIZE, OPUS_FRAME_DURATION_MS,
+};
 use crate::audio::shared_audio_context::SharedAudioContext;
+use crate::audio_constants::{
+    rms_to_intensity, AUDIO_LEVEL_DELTA_THRESHOLD, DEFAULT_VAD_THRESHOLD,
+};
 use crate::constants::{AUDIO_CHANNELS, AUDIO_SAMPLE_RATE};
 use crate::decode::{AudioPeerDecoderTrait, DecodeStatus};
 use js_sys::Float32Array;
@@ -66,6 +72,15 @@ pub struct NetEqAudioPeerDecoder {
     // Message queueing system
     pending_messages: Rc<RefCell<VecDeque<WorkerMsg>>>,
     worker_ready: Rc<RefCell<bool>>,
+
+    // Voice activity detection state
+    speaking: Rc<RefCell<bool>>,
+    audio_level: Rc<RefCell<f32>>,
+
+    /// Ring buffer of recently received audio sequence numbers.
+    /// Used to detect whether a redundant frame carried in a RED packet
+    /// was already received, avoiding duplicate injection.
+    received_sequences: VecDeque<u64>,
 }
 
 impl NetEqAudioPeerDecoder {
@@ -137,13 +152,77 @@ impl NetEqAudioPeerDecoder {
         Ok((audio_context, pcm_player))
     }
 
-    /// Handle PCM audio data from NetEq worker
+    /// Calculate RMS (Root Mean Square) of audio samples for voice activity detection.
+    ///
+    /// This is part of the **decoder-side (remote peer) VAD**.  We run a
+    /// fast-path RMS check on every decoded PCM frame so the UI can show a
+    /// speaking indicator for remote peers with sub-second latency, rather
+    /// than waiting for the 1Hz heartbeat update that carries the remote
+    /// user's own (encoder-side) `is_speaking` flag.
+    fn calculate_rms(pcm: &Float32Array) -> f32 {
+        let length = pcm.length() as usize;
+        if length == 0 {
+            return 0.0;
+        }
+
+        let mut sum_squares: f32 = 0.0;
+        for i in 0..length {
+            let sample = pcm.get_index(i as u32);
+            sum_squares += sample * sample;
+        }
+
+        (sum_squares / length as f32).sqrt()
+    }
+
+    /// Handle PCM audio data from NetEq worker.
+    ///
+    /// Includes decoder-side VAD: computes RMS on the decoded PCM and emits
+    /// a `peer_speaking` diagnostics event when the speaking state changes.
+    /// This gives the UI a faster speaking indicator for remote peers than
+    /// the 1Hz heartbeat, which only reflects the remote user's own
+    /// encoder-side VAD result.
+    #[allow(clippy::too_many_arguments)]
     fn handle_pcm_data(
         pcm: Float32Array,
         pcm_player: Rc<RefCell<Option<AudioWorkletNode>>>,
         audio_context: &AudioContext,
         speaker_device_id: Option<String>,
+        peer_id: String,
+        speaking: Rc<RefCell<bool>>,
+        audio_level: Rc<RefCell<f32>>,
+        vad_threshold: f32,
     ) {
+        // Calculate RMS for voice activity detection
+        let rms = Self::calculate_rms(&pcm);
+        let is_speaking = rms > vad_threshold;
+
+        // Normalize RMS to a 0.0–1.0 intensity range using the shared
+        // perceptual curve (sqrt for human hearing).
+        let intensity = rms_to_intensity(rms, vad_threshold);
+
+        // Emit a diagnostics event when the speaking boolean toggles OR
+        // when the audio level changes by more than 0.02.  This keeps the
+        // event rate reasonable while giving the UI smooth level updates.
+        let prev_speaking = *speaking.borrow();
+        let prev_level = *audio_level.borrow();
+        let level_changed = (intensity - prev_level).abs() > AUDIO_LEVEL_DELTA_THRESHOLD;
+
+        if is_speaking != prev_speaking || level_changed {
+            *speaking.borrow_mut() = is_speaking;
+            *audio_level.borrow_mut() = intensity;
+
+            let _ = global_sender().try_broadcast(DiagEvent {
+                subsystem: "peer_speaking",
+                stream_id: Some(format!("speaking->{peer_id}")),
+                ts_ms: now_ms(),
+                metrics: vec![
+                    metric!("to_peer", peer_id.clone()),
+                    metric!("speaking", if is_speaking { 1u64 } else { 0u64 }),
+                    metric!("audio_level", intensity as f64),
+                ],
+            });
+        }
+
         // Ensure AudioContext is running
         if let Err(e) = audio_context.resume() {
             web_sys::console::warn_1(
@@ -329,6 +408,7 @@ impl NetEqAudioPeerDecoder {
     }
 
     /// Create message handler for NetEq worker
+    #[allow(clippy::too_many_arguments)]
     fn create_message_handler(
         pcm_player: Rc<RefCell<Option<AudioWorkletNode>>>,
         audio_context: AudioContext,
@@ -337,18 +417,25 @@ impl NetEqAudioPeerDecoder {
         worker_ready: Rc<RefCell<bool>>,
         pending_messages: Rc<RefCell<VecDeque<WorkerMsg>>>,
         worker: Worker,
+        speaking: Rc<RefCell<bool>>,
+        audio_level: Rc<RefCell<f32>>,
+        vad_threshold: f32,
     ) -> Closure<dyn FnMut(MessageEvent)> {
         Closure::wrap(Box::new(move |event: MessageEvent| {
             let data = event.data();
 
             if data.is_instance_of::<Float32Array>() {
-                // High-performance PCM path (unchanged)
+                // High-performance PCM path with voice activity detection
                 let pcm = Float32Array::from(data);
                 Self::handle_pcm_data(
                     pcm,
                     pcm_player.clone(),
                     &audio_context,
                     speaker_device_id.clone(),
+                    peer_id.clone(),
+                    speaking.clone(),
+                    audio_level.clone(),
+                    vad_threshold,
                 );
             } else if data.is_object() {
                 // Try to parse as WorkerResponse first
@@ -401,8 +488,10 @@ impl NetEqAudioPeerDecoder {
     pub fn new_with_muted_state(
         speaker_device_id: Option<String>,
         peer_id: String,
+        vad_threshold: Option<f32>,
     ) -> Result<Box<dyn AudioPeerDecoderTrait>, JsValue> {
-        Self::new_with_mute_state(speaker_device_id, peer_id, true) // Default to muted
+        Self::new_with_mute_state(speaker_device_id, peer_id, true, vad_threshold)
+        // Default to muted
     }
 
     /// Create audio decoder with explicit initial mute state
@@ -410,6 +499,7 @@ impl NetEqAudioPeerDecoder {
         speaker_device_id: Option<String>,
         peer_id: String,
         initial_muted: bool,
+        vad_threshold: Option<f32>,
     ) -> Result<Box<dyn AudioPeerDecoderTrait>, JsValue> {
         // Create worker
         let worker = Self::create_neteq_worker()?;
@@ -419,6 +509,8 @@ impl NetEqAudioPeerDecoder {
         SharedAudioContext::ensure_pcm_worklet(WORKLET_CODE);
 
         let pcm_player_ref = Rc::new(RefCell::new(None::<AudioWorkletNode>));
+
+        let threshold = vad_threshold.unwrap_or(DEFAULT_VAD_THRESHOLD);
 
         // Create decoder with explicit mute state first
         let mut decoder = Self {
@@ -431,6 +523,13 @@ impl NetEqAudioPeerDecoder {
             // Message queueing system
             pending_messages: Rc::new(RefCell::new(VecDeque::new())),
             worker_ready: Rc::new(RefCell::new(false)),
+
+            // Voice activity detection state
+            speaking: Rc::new(RefCell::new(false)),
+            audio_level: Rc::new(RefCell::new(0.0)),
+
+            // RED redundancy: track recently received sequence numbers
+            received_sequences: VecDeque::with_capacity(AUDIO_RED_SEQ_HISTORY_SIZE),
         };
 
         // Set up worker message handling with decoder's queue references
@@ -442,9 +541,17 @@ impl NetEqAudioPeerDecoder {
             decoder.worker_ready.clone(),
             decoder.pending_messages.clone(),
             worker.clone(),
+            decoder.speaking.clone(),
+            decoder.audio_level.clone(),
+            threshold,
         );
 
         worker.set_onmessage(Some(on_message_closure.as_ref().unchecked_ref()));
+        // Intentionally leaked: the closure must live as long as the Worker,
+        // which has no mechanism for preventing the closure from being GC'd
+        // other than calling `.forget()`.  All captured `Rc`s (including
+        // `speaking`, `pcm_player`, `worker_ready`, `pending_messages`) are
+        // therefore permanently held until the Worker is terminated via Drop.
         on_message_closure.forget();
 
         // Initialize worker
@@ -488,6 +595,66 @@ impl NetEqAudioPeerDecoder {
 
         Ok(Box::new(decoder))
     }
+
+    /// Record a sequence number as received for RED deduplication.
+    fn record_sequence(&mut self, seq: u64) {
+        if self.received_sequences.len() >= AUDIO_RED_SEQ_HISTORY_SIZE {
+            self.received_sequences.pop_front();
+        }
+        self.received_sequences.push_back(seq);
+    }
+
+    /// Check whether a sequence number was already received.
+    fn has_sequence(&self, seq: u64) -> bool {
+        self.received_sequences.contains(&seq)
+    }
+
+    /// Unpack a RED-encoded audio data buffer.
+    ///
+    /// Expected format:
+    /// `[4-byte primary_len LE][primary_data][4-byte redundant_seq LE][redundant_data]`
+    ///
+    /// Returns `(primary_data, redundant_sequence, redundant_data)` or `None` if
+    /// the buffer is too short or malformed.
+    fn unpack_red_audio(data: &[u8]) -> Option<(Vec<u8>, u32, Vec<u8>)> {
+        // Minimum: 4 (primary_len) + 0 (primary) + 4 (redundant_seq) + 0 (redundant)
+        if data.len() < 8 {
+            return None;
+        }
+
+        let primary_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+
+        // Sanity check: an individual Opus audio frame should never exceed 10KB.
+        // Reject clearly malformed or corrupt packets early.
+        if primary_len > 10_000 {
+            return None;
+        }
+
+        // Validate: primary_len + 4 (itself) + 4 (redundant_seq) must not exceed total
+        let redundant_seq_offset = 4 + primary_len;
+        if redundant_seq_offset + 4 > data.len() {
+            return None;
+        }
+
+        let primary_data = data[4..4 + primary_len].to_vec();
+
+        let redundant_seq = u32::from_le_bytes([
+            data[redundant_seq_offset],
+            data[redundant_seq_offset + 1],
+            data[redundant_seq_offset + 2],
+            data[redundant_seq_offset + 3],
+        ]);
+
+        let redundant_data = data[redundant_seq_offset + 4..].to_vec();
+
+        Some((primary_data, redundant_seq, redundant_data))
+    }
+
+    /// Public wrapper around `unpack_red_audio` for cross-module tests.
+    #[cfg(test)]
+    pub fn unpack_red_audio_public(data: &[u8]) -> Option<(Vec<u8>, u32, Vec<u8>)> {
+        Self::unpack_red_audio(data)
+    }
 }
 
 impl Drop for NetEqAudioPeerDecoder {
@@ -500,15 +667,71 @@ impl crate::decode::AudioPeerDecoderTrait for NetEqAudioPeerDecoder {
     fn decode(&mut self, packet: &Arc<MediaPacket>) -> anyhow::Result<DecodeStatus> {
         match packet.audio_metadata.as_ref() {
             Some(audio_meta) => {
-                // Normal path – send the packet to the NetEq worker through queue
-                let insert = WorkerMsg::Insert {
-                    seq: audio_meta.sequence as u16,
-                    timestamp: packet.timestamp as u32,
-                    payload: packet.data.clone(),
-                };
+                let seq = audio_meta.sequence;
 
-                // Send through queue (will be immediate if worker ready, queued otherwise)
-                self.send_worker_message(insert);
+                // Track this sequence number so we can detect duplicates from
+                // redundancy payloads later.
+                self.record_sequence(seq);
+
+                // Check whether the packet carries RED-style redundancy.
+                let is_red = audio_meta.audio_format == AUDIO_RED_FORMAT;
+
+                if is_red {
+                    // Unpack the RED payload:
+                    // [4-byte primary_len LE][primary_data][4-byte redundant_seq LE][redundant_data]
+                    if let Some((primary, redundant_seq, redundant_data)) =
+                        Self::unpack_red_audio(&packet.data)
+                    {
+                        // First, check if the redundant frame was lost (not yet received).
+                        if !self.has_sequence(redundant_seq as u64) {
+                            log::debug!(
+                                "RED recovery: injecting lost audio seq {} for peer {}",
+                                redundant_seq,
+                                self.peer_id
+                            );
+                            self.record_sequence(redundant_seq as u64);
+                            // Inject the recovered frame with its original sequence and
+                            // an earlier timestamp (one Opus frame before the primary).
+                            let recovered_insert = WorkerMsg::Insert {
+                                seq: redundant_seq as u16,
+                                timestamp: (packet.timestamp as u32)
+                                    .saturating_sub(OPUS_FRAME_DURATION_MS),
+                                payload: redundant_data,
+                            };
+                            self.send_worker_message(recovered_insert);
+                        }
+
+                        // Now send the primary frame.
+                        let insert = WorkerMsg::Insert {
+                            seq: seq as u16,
+                            timestamp: packet.timestamp as u32,
+                            payload: primary,
+                        };
+                        self.send_worker_message(insert);
+                    } else {
+                        // RED unpack failed -- fall back to treating the whole
+                        // data blob as a single frame.
+                        log::warn!(
+                            "RED unpack failed for peer {} seq {}, falling back to raw",
+                            self.peer_id,
+                            seq
+                        );
+                        let insert = WorkerMsg::Insert {
+                            seq: seq as u16,
+                            timestamp: packet.timestamp as u32,
+                            payload: packet.data.clone(),
+                        };
+                        self.send_worker_message(insert);
+                    }
+                } else {
+                    // Standard (non-RED) audio packet.
+                    let insert = WorkerMsg::Insert {
+                        seq: seq as u16,
+                        timestamp: packet.timestamp as u32,
+                        payload: packet.data.clone(),
+                    };
+                    self.send_worker_message(insert);
+                }
 
                 let first_frame = !self.decoded;
                 self.decoded = true;
@@ -576,5 +799,230 @@ impl crate::decode::AudioPeerDecoderTrait for NetEqAudioPeerDecoder {
             muted,
             now
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen_test]
+    fn unpack_valid_red_data() {
+        // Manually build a RED buffer:
+        // [4-byte primary_len LE][primary_data][4-byte redundant_seq LE][redundant_data]
+        let primary = b"primary_frame";
+        let redundant = b"redundant_frame";
+        let primary_len = (primary.len() as u32).to_le_bytes();
+        let redundant_seq = 42u32.to_le_bytes();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.extend_from_slice(primary);
+        data.extend_from_slice(&redundant_seq);
+        data.extend_from_slice(redundant);
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(result.is_some());
+
+        let (p, seq, r) = result.unwrap();
+        assert_eq!(p, primary);
+        assert_eq!(seq, 42);
+        assert_eq!(r, redundant);
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_empty_input() {
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&[]);
+        assert!(result.is_none(), "empty input should return None");
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_too_short_input() {
+        // Less than 8 bytes (minimum: 4 primary_len + 0 primary + 4 redundant_seq)
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&[0, 0, 0]);
+        assert!(result.is_none(), "3 bytes should return None");
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&[0, 0, 0, 0, 0, 0, 0]);
+        assert!(result.is_none(), "7 bytes should return None");
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_exactly_8_bytes_zero_length_frames() {
+        // primary_len=0, redundant_seq=0, no primary data, no redundant data
+        let data = [0u8; 8];
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(result.is_some());
+
+        let (p, seq, r) = result.unwrap();
+        assert!(p.is_empty());
+        assert_eq!(seq, 0);
+        assert!(r.is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_primary_len_exceeds_sanity_limit() {
+        // primary_len > 10,000 should return None
+        let primary_len = 10_001u32.to_le_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.extend_from_slice(&[0u8; 8]); // some filler
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(result.is_none(), "primary_len > 10000 should be rejected");
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_primary_len_at_sanity_limit() {
+        // primary_len == 10,000 should be accepted (boundary)
+        let primary_len = 10_000u32.to_le_bytes();
+        let primary_data = vec![0xAA; 10_000];
+        let redundant_seq = 5u32.to_le_bytes();
+        let redundant_data = b"red";
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.extend_from_slice(&primary_data);
+        data.extend_from_slice(&redundant_seq);
+        data.extend_from_slice(redundant_data);
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(result.is_some(), "primary_len == 10000 should be accepted");
+
+        let (p, seq, r) = result.unwrap();
+        assert_eq!(p.len(), 10_000);
+        assert_eq!(seq, 5);
+        assert_eq!(r, redundant_data);
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_primary_len_exceeds_data_length() {
+        // primary_len claims 100 bytes but total data is only 20 bytes
+        let primary_len = 100u32.to_le_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.extend_from_slice(&[0u8; 16]); // only 16 bytes after primary_len header
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(
+            result.is_none(),
+            "malformed packet with primary_len > remaining data should return None"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_no_room_for_redundant_seq() {
+        // primary_len = 10, but data only has 4 (header) + 10 (primary) + 3 (not enough for seq)
+        let primary_len = 10u32.to_le_bytes();
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.extend_from_slice(&[0xBB; 10]); // primary data
+        data.extend_from_slice(&[0, 0, 0]); // only 3 bytes, need 4 for seq
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(
+            result.is_none(),
+            "not enough room for redundant_seq should return None"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_no_redundant_data_after_seq() {
+        // Valid format but zero-length redundant data
+        let primary_len = 5u32.to_le_bytes();
+        let redundant_seq = 99u32.to_le_bytes();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.extend_from_slice(b"AUDIO");
+        data.extend_from_slice(&redundant_seq);
+        // No redundant data after seq
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(result.is_some());
+
+        let (p, seq, r) = result.unwrap();
+        assert_eq!(p, b"AUDIO");
+        assert_eq!(seq, 99);
+        assert!(r.is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_preserves_binary_data() {
+        // Ensure all byte values 0x00-0xFF are preserved correctly
+        let primary: Vec<u8> = (0..=255).collect();
+        let redundant: Vec<u8> = (0..=255).rev().collect();
+        let primary_len = (primary.len() as u32).to_le_bytes();
+        let redundant_seq = 1000u32.to_le_bytes();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.extend_from_slice(&primary);
+        data.extend_from_slice(&redundant_seq);
+        data.extend_from_slice(&redundant);
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(result.is_some());
+
+        let (p, seq, r) = result.unwrap();
+        assert_eq!(p, primary);
+        assert_eq!(seq, 1000);
+        assert_eq!(r, redundant);
+    }
+
+    #[wasm_bindgen_test]
+    fn unpack_max_valid_sequence_number() {
+        let primary_len = 1u32.to_le_bytes();
+        let redundant_seq = u32::MAX.to_le_bytes();
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&primary_len);
+        data.push(0xFF); // 1 byte primary
+        data.extend_from_slice(&redundant_seq);
+        data.push(0xAA); // 1 byte redundant
+
+        let result = NetEqAudioPeerDecoder::unpack_red_audio(&data);
+        assert!(result.is_some());
+
+        let (_, seq, _) = result.unwrap();
+        assert_eq!(seq, u32::MAX);
+    }
+
+    #[wasm_bindgen_test]
+    fn record_and_has_sequence() {
+        // Test the sequence tracking ring buffer used for RED deduplication.
+        // We can't construct a full NetEqAudioPeerDecoder without browser APIs,
+        // so we test the VecDeque logic directly.
+        use std::collections::VecDeque;
+
+        let capacity = crate::adaptive_quality_constants::AUDIO_RED_SEQ_HISTORY_SIZE;
+        let mut received: VecDeque<u64> = VecDeque::with_capacity(capacity);
+
+        // Helper: mirrors record_sequence logic
+        let record = |buf: &mut VecDeque<u64>, seq: u64| {
+            if buf.len() >= capacity {
+                buf.pop_front();
+            }
+            buf.push_back(seq);
+        };
+
+        // Record some sequences
+        record(&mut received, 10);
+        record(&mut received, 11);
+        record(&mut received, 12);
+
+        assert!(received.contains(&10));
+        assert!(received.contains(&11));
+        assert!(received.contains(&12));
+        assert!(!received.contains(&13));
+
+        // Fill to capacity and verify eviction
+        for i in 13..(13 + capacity as u64) {
+            record(&mut received, i);
+        }
+
+        // Sequence 10 should have been evicted
+        assert!(!received.contains(&10));
+        assert_eq!(received.len(), capacity);
     }
 }

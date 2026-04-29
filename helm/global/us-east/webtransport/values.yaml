@@ -9,7 +9,7 @@ rustlemania-webtransport:
   tlsSecret: webtransport-us-east-tls
 
   image:
-    repository: securityunion/rustlemania-api
+    repository: securityunion/videocall-media-server
     pullPolicy: Always
     tag: latest
 
@@ -44,14 +44,19 @@ rustlemania-webtransport:
       value: "4"  # Optimal for 3500m CPU (WebTransport + crypto operations)
     - name: TOKIO_BLOCKING_THREADS
       value: "2"  # Small pool for blocking crypto operations
+    - name: JWT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: jwt-secret
+          key: secret
 
   resources:
     limits:
       cpu: "3500m"
       memory: "6000Mi"
     requests:
-      cpu: "3500m"
-      memory: "6000Mi"
+      cpu: "200m"
+      memory: "256Mi"
 
   service:
     type: LoadBalancer  # LoadBalancer for UDP traffic
@@ -68,6 +73,11 @@ rustlemania-webtransport:
       service.beta.kubernetes.io/do-loadbalancer-healthcheck-port: "444"
       service.beta.kubernetes.io/do-loadbalancer-healthcheck-path: "/healthz"
       external-dns.alpha.kubernetes.io/hostname: "webtransport-us-east.webtransport.video"
+
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "444"
+    prometheus.io/path: "/metrics"
 
   autoscaling:
     enabled: false

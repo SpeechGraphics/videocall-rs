@@ -17,4 +17,10 @@
  */
 
 pub mod chat_server;
-pub mod chat_session;
+pub mod packet_handler;
+pub mod session_logic;
+pub mod transports;
+
+// Re-export commonly used types
+pub use session_logic::{RoomId, SessionId, UserId};
+pub use transports::{WsChatSession, WtChatSession};

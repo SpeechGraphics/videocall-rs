@@ -22,12 +22,15 @@ mod microphone_encoder;
 mod screen_encoder;
 mod transform;
 
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32};
+
 use crate::VideoCallClient;
-use yew::Callback;
+use videocall_types::Callback;
 
 pub use camera_encoder::CameraEncoder;
 pub use microphone_encoder::MicrophoneEncoder;
-pub use screen_encoder::ScreenEncoder;
+pub use screen_encoder::{ScreenEncoder, ScreenShareEvent};
 
 /// Trait to abstract over different microphone encoder implementations
 pub trait MicrophoneEncoderTrait {
@@ -35,13 +38,7 @@ pub trait MicrophoneEncoderTrait {
     fn stop(&mut self);
     fn select(&mut self, device_id: String) -> bool;
     fn set_enabled(&mut self, enabled: bool) -> bool;
-    fn set_error_callback(&mut self, on_error: yew::Callback<String>);
-    fn set_encoder_control(
-        &mut self,
-        rx: futures::channel::mpsc::UnboundedReceiver<
-            videocall_types::protos::diagnostics_packet::DiagnosticsPacket,
-        >,
-    );
+    fn set_error_callback(&mut self, on_error: Callback<String>);
 }
 
 // Implement trait for Safari microphone encoder
@@ -62,31 +59,33 @@ impl MicrophoneEncoderTrait for MicrophoneEncoder {
         self.set_enabled(enabled)
     }
 
-    fn set_error_callback(&mut self, on_error: yew::Callback<String>) {
+    fn set_error_callback(&mut self, on_error: Callback<String>) {
         self.set_error_callback(on_error)
-    }
-
-    fn set_encoder_control(
-        &mut self,
-        rx: futures::channel::mpsc::UnboundedReceiver<
-            videocall_types::protos::diagnostics_packet::DiagnosticsPacket,
-        >,
-    ) {
-        self.set_encoder_control(rx);
     }
 }
 
-/// Factory function to create the appropriate microphone encoder based on platform detection
+/// Factory function to create the appropriate microphone encoder based on platform detection.
+///
+/// `shared_audio_tier_bitrate` and `shared_audio_tier_fec` are optional shared
+/// atomics from the `CameraEncoder`. When provided, the microphone encoder
+/// reads the audio quality tier from the camera encoder's quality manager
+/// instead of creating its own `EncoderBitrateController`.
 pub fn create_microphone_encoder(
     client: VideoCallClient,
     bitrate_kbps: u32,
     on_encoder_settings_update: Callback<String>,
     on_error: Callback<String>,
+    vad_threshold: Option<f32>,
+    shared_audio_tier_bitrate: Option<Rc<AtomicU32>>,
+    shared_audio_tier_fec: Option<Rc<AtomicBool>>,
 ) -> Box<dyn MicrophoneEncoderTrait> {
     Box::new(MicrophoneEncoder::new(
         client,
         bitrate_kbps,
         on_encoder_settings_update,
         on_error,
+        vad_threshold,
+        shared_audio_tier_bitrate,
+        shared_audio_tier_fec,
     ))
 }

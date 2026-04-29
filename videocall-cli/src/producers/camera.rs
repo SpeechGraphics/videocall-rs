@@ -35,7 +35,7 @@ use videocall_nokhwa::{
 };
 
 use videocall_types::protos::media_packet::media_packet::MediaType;
-use videocall_types::protos::media_packet::{MediaPacket, VideoMetadata};
+use videocall_types::protos::media_packet::{MediaPacket, VideoCodec, VideoMetadata};
 use videocall_types::protos::packet_wrapper::{packet_wrapper::PacketType, PacketWrapper};
 
 use super::encoder_thread::encoder_thread;
@@ -57,20 +57,22 @@ impl CameraPacket {
     }
 }
 
-pub fn transform_video_chunk(frame: &Frame, email: &str) -> PacketWrapper {
+pub fn transform_video_chunk(frame: &Frame, user_id: &str) -> PacketWrapper {
     let frame_type = if frame.key {
         "key".to_string()
     } else {
         "delta".to_string()
     };
+    let user_id_bytes = user_id.as_bytes();
     let media_packet: MediaPacket = MediaPacket {
         data: frame.data.to_vec(),
         frame_type,
-        email: email.to_owned(),
+        user_id: user_id_bytes.to_vec(),
         media_type: MediaType::VIDEO.into(),
         timestamp: since_the_epoch().as_micros() as f64,
         video_metadata: Some(VideoMetadata {
             sequence: frame.pts as u64,
+            codec: VideoCodec::VP9_PROFILE0_LEVEL10_8BIT.into(),
             ..Default::default()
         })
         .into(),
@@ -79,7 +81,7 @@ pub fn transform_video_chunk(frame: &Frame, email: &str) -> PacketWrapper {
     let data = media_packet.write_to_bytes().unwrap();
     PacketWrapper {
         data,
-        email: media_packet.email,
+        user_id: user_id_bytes.to_vec(),
         packet_type: PacketType::MEDIA.into(),
         ..Default::default()
     }

@@ -16,11 +16,11 @@
  * conditions.
  */
 
-use std::{cell::RefCell, rc::Rc};
-
+#[allow(unused_imports)]
 use gloo_utils::format::JsValueSerdeExt;
 use js_sys::{Array, Function};
 use serde::Serialize;
+use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{AudioContext, AudioWorkletNode, AudioWorkletNodeOptions, MessagePort};
 
@@ -65,6 +65,34 @@ pub struct EncoderInitOptions {
     // Default: 50000
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encoder_bit_rate: Option<u32>,
+
+    // Enable Opus in-band Forward Error Correction (FEC).
+    // When enabled, the encoder embeds redundant data from the previous frame
+    // into the current frame, allowing the decoder to partially recover from
+    // single-packet losses without retransmission. Adds ~10-20% overhead.
+    //
+    // NOTE: The underlying AudioWorklet (encoderWorker) must be updated to
+    // support this parameter. Until then, this field is serialized but the
+    // worklet will ignore it. See adaptive_quality_constants.rs for tier
+    // definitions that set enable_fec per quality level.
+    //
+    // Default: false (no FEC)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_fec: Option<bool>,
+
+    // Enable Opus Discontinuous Transmission (DTX).
+    // When enabled, the encoder detects silence and sends comfort noise
+    // parameters (~1-2 packets/sec) instead of full frames (~50 packets/sec),
+    // reducing audio bandwidth by 80-90% during silence periods.
+    //
+    // NOTE: The underlying AudioWorklet (encoderWorker) must be updated to
+    // support this parameter. Until then, this field is serialized but the
+    // worklet will ignore it. See adaptive_quality_constants.rs for tier
+    // definitions that set enable_dtx per quality level.
+    //
+    // Default: false (no DTX)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_dtx: Option<bool>,
 }
 
 #[derive(Serialize, Debug, Default)]
@@ -156,9 +184,9 @@ impl AudioWorkletCodec {
     }
 
     pub fn destroy(&self) {
-        let _ = self.send_message(EncoderMessages::Close);
         let _ = self.send_message(EncoderMessages::Flush);
         let _ = self.send_message(EncoderMessages::Done);
+        let _ = self.send_message(EncoderMessages::Close);
         let _ = self.inner.borrow_mut().take();
     }
 
@@ -172,6 +200,7 @@ impl AudioWorkletCodec {
         self.get_port()
             .ok_or(JsValue::from_str("AudioWorkletNode is not instantiated"))
             .and_then(|port| {
+                #[allow(deprecated)]
                 JsValue::from_serde(&message)
                     .map_err(|e| JsValue::from_str(&e.to_string()))
                     .and_then(|val| port.post_message(&val))

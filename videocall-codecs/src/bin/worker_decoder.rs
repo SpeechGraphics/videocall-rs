@@ -37,13 +37,13 @@
 
 use std::cell::RefCell;
 use videocall_codecs::decoder::{Decodable, DecodedFrame, VideoCodec};
-use videocall_codecs::frame::{FrameBuffer, VideoFrame};
+use videocall_codecs::frame::{FrameBuffer, FrameCodec, VideoFrame};
 use videocall_codecs::jitter_buffer::JitterBuffer;
 use videocall_codecs::messages::{VideoStatsMessage, WorkerMessage};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
-    console, DedicatedWorkerGlobalScope, EncodedVideoChunk, EncodedVideoChunkInit,
+    console, CodecState, DedicatedWorkerGlobalScope, EncodedVideoChunk, EncodedVideoChunkInit,
     EncodedVideoChunkType, VideoDecoder, VideoDecoderConfig, VideoDecoderInit,
     VideoFrame as WebVideoFrame,
 };
@@ -51,6 +51,7 @@ use web_sys::{
 /// WebDecoder implementation that wraps WebCodecs VideoDecoder
 struct WebDecoder {
     decoder: RefCell<Option<VideoDecoder>>,
+    current_codec: RefCell<Option<FrameCodec>>,
     self_scope: DedicatedWorkerGlobalScope,
 }
 
@@ -62,14 +63,44 @@ impl WebDecoder {
     fn new(self_scope: DedicatedWorkerGlobalScope) -> Self {
         Self {
             decoder: RefCell::new(None),
+            current_codec: RefCell::new(None),
             self_scope,
         }
     }
 
-    fn initialize_decoder(&self) -> Result<(), String> {
+    fn initialize_decoder(&self, codec: FrameCodec) -> Result<(), String> {
+        // Skip unknown codecs - cannot decode
+        let codec_str = match codec.as_webcodecs_str() {
+            Some(s) => s,
+            None => return Err("Unknown codec - cannot decode".to_string()),
+        };
+
         let mut decoder_ref = self.decoder.borrow_mut();
-        if decoder_ref.is_some() {
-            return Ok(());
+        let mut codec_ref = self.current_codec.borrow_mut();
+
+        // Check if we already have a decoder with the same codec AND it is still usable.
+        // A decoder whose state is Closed (e.g. after an async WebCodecs error) must be
+        // torn down and recreated — returning early here would leave the pipeline permanently
+        // stuck.
+        if let Some(existing) = decoder_ref.as_ref() {
+            if *codec_ref == Some(codec) && existing.state() == CodecState::Configured {
+                return Ok(());
+            }
+        }
+
+        // Tear down the old decoder if it exists — either the codec changed or the decoder
+        // entered a non-Configured state (Closed after an error, Unconfigured, etc.).
+        if let Some(decoder) = decoder_ref.take() {
+            let old_state = decoder.state();
+            console::log_1(
+                &format!(
+                    "[WORKER] Replacing decoder (state={old_state:?}, old_codec={codec_ref:?}, new_codec={codec:?})"
+                )
+                .into(),
+            );
+            if old_state != CodecState::Closed {
+                let _ = decoder.close();
+            }
         }
 
         let self_scope = self.self_scope.clone();
@@ -99,7 +130,10 @@ impl WebDecoder {
 
         let decoder =
             VideoDecoder::new(&init).map_err(|e| format!("Failed to create decoder: {e:?}"))?;
-        let config = VideoDecoderConfig::new("vp09.00.10.08");
+
+        // Configure with the codec from the incoming frame
+        console::log_1(&format!("[WORKER] Configuring decoder with codec: {codec_str}").into());
+        let config = VideoDecoderConfig::new(codec_str);
         decoder
             .configure(&config)
             .map_err(|e| format!("Failed to configure decoder: {e:?}"))?;
@@ -108,7 +142,10 @@ impl WebDecoder {
         on_error.forget();
 
         *decoder_ref = Some(decoder);
-        console::log_1(&"[WORKER] WebCodecs decoder initialized".into());
+        *codec_ref = Some(codec);
+        console::log_1(
+            &format!("[WORKER] WebCodecs decoder initialized with codec: {codec:?}").into(),
+        );
         Ok(())
     }
 
@@ -120,14 +157,14 @@ impl WebDecoder {
         let mut decoder_ref = self.decoder.borrow_mut();
 
         if let Some(decoder) = decoder_ref.take() {
-            // Attempt to close the decoder. If it is already closed the call may return an
-            // `InvalidStateError`; we simply log and continue.
-            if let Err(e) = decoder.close() {
-                console::error_1(
-                    &format!("[WORKER] Failed to close decoder cleanly: {e:?}").into(),
-                );
-            } else {
-                console::log_1(&"[WORKER] Video decoder closed".into());
+            if decoder.state() != CodecState::Closed {
+                if let Err(e) = decoder.close() {
+                    console::error_1(
+                        &format!("[WORKER] Failed to close decoder cleanly: {e:?}").into(),
+                    );
+                } else {
+                    console::log_1(&"[WORKER] Video decoder closed".into());
+                }
             }
 
             console::log_1(&"[WORKER] Video decoder destroyed".into());
@@ -165,16 +202,30 @@ impl Decodable for WebDecoder {
     }
 
     fn decode(&self, frame: FrameBuffer) {
-        // Initialize decoder if needed
-        if self.decoder.borrow().is_none() {
-            if let Err(e) = self.initialize_decoder() {
-                console::error_1(&format!("[WORKER] Failed to initialize decoder: {e:?}").into());
-                return;
-            }
+        let frame_codec = frame.frame.codec;
+
+        // Initialize or reconfigure decoder based on frame's codec
+        if let Err(e) = self.initialize_decoder(frame_codec) {
+            console::error_1(&format!("[WORKER] Failed to initialize decoder: {e:?}").into());
+            return;
         }
 
         let decoder_ref = self.decoder.borrow();
         if let Some(decoder) = decoder_ref.as_ref() {
+            // Only decode when the VideoDecoder is in the Configured state.
+            // After a successful initialize_decoder() call this should always be true,
+            // but guard defensively against unexpected browser-side state transitions.
+            if decoder.state() != CodecState::Configured {
+                console::warn_1(
+                    &format!(
+                        "[WORKER] Decoder in unexpected state {:?} after initialization, skipping frame",
+                        decoder.state()
+                    )
+                    .into(),
+                );
+                return;
+            }
+
             let chunk_type = match frame.frame.frame_type {
                 videocall_codecs::frame::FrameType::KeyFrame => EncodedVideoChunkType::Key,
                 videocall_codecs::frame::FrameType::DeltaFrame => EncodedVideoChunkType::Delta,
@@ -282,10 +333,11 @@ fn insert_frame_to_jitter_buffer(frame: FrameBuffer) {
         }
 
         if let Some(jb) = jb_opt.as_mut() {
-            // Convert FrameBuffer to VideoFrame
+            // Convert FrameBuffer to VideoFrame, preserving the codec
             let video_frame = VideoFrame {
                 sequence_number: frame.sequence_number(),
                 frame_type: frame.frame.frame_type,
+                codec: frame.frame.codec,
                 data: frame.frame.data.clone(),
                 timestamp: frame.frame.timestamp,
             };

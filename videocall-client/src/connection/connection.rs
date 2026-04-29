@@ -22,17 +22,18 @@
 ///
 use super::task::Task;
 use super::ConnectOptions;
+use crate::adaptive_quality_constants::HEARTBEAT_KEEPALIVE_INTERVAL_MS;
 use crate::crypto::aes::Aes128State;
 use gloo::timers::callback::Interval;
 use protobuf::Message;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 use videocall_types::protos::media_packet::media_packet::MediaType;
 use videocall_types::protos::media_packet::{HeartbeatMetadata, MediaPacket};
 use videocall_types::protos::packet_wrapper::packet_wrapper::PacketType;
 use videocall_types::protos::packet_wrapper::PacketWrapper;
-use yew::prelude::Callback;
+use videocall_types::Callback;
 
 #[derive(Clone, Copy, Debug)]
 enum Status {
@@ -51,6 +52,11 @@ pub struct Connection {
     video_enabled: Rc<AtomicBool>,
     audio_enabled: Rc<AtomicBool>,
     screen_enabled: Rc<AtomicBool>,
+    is_speaking: Rc<AtomicBool>,
+    session_id: Rc<RefCell<Option<u64>>>,
+    /// Not wrapped in `Rc` because it is only accessed via `&self` methods,
+    /// unlike `session_id` which is shared with the heartbeat `Interval` closure.
+    userid: RefCell<Option<String>>,
     url: String,
 }
 
@@ -61,7 +67,6 @@ impl Connection {
         aes: Rc<Aes128State>,
     ) -> anyhow::Result<Self> {
         let mut new_options = options.clone();
-        let userid = new_options.userid.clone();
         let status = Rc::new(Cell::new(Status::Connecting));
 
         let url = if webtransport {
@@ -85,7 +90,7 @@ impl Connection {
         let monitor = new_options.peer_monitor.clone();
         let task = Task::connect(webtransport, new_options)?;
 
-        let mut connection = Self {
+        let connection = Self {
             task: Rc::new(task),
             heartbeat: None,
             heartbeat_monitor: Some(Interval::new(5000, move || {
@@ -96,9 +101,11 @@ impl Connection {
             audio_enabled: Rc::new(AtomicBool::new(false)),
             video_enabled: Rc::new(AtomicBool::new(false)),
             screen_enabled: Rc::new(AtomicBool::new(false)),
+            is_speaking: Rc::new(AtomicBool::new(false)),
+            session_id: Rc::new(RefCell::new(None)),
+            userid: RefCell::new(None),
             url,
         };
-        connection.start_heartbeat(userid);
 
         Ok(connection)
     }
@@ -107,37 +114,33 @@ impl Connection {
         matches!(self.status.get(), Status::Connected)
     }
 
-    fn start_heartbeat(&mut self, userid: String) {
+    pub fn start_heartbeat(&mut self, userid: String) {
+        *self.userid.borrow_mut() = Some(userid.clone());
         let task = Rc::clone(&self.task);
         let status = Rc::clone(&self.status);
         let aes = Rc::clone(&self.aes);
         let video_enabled = Rc::clone(&self.video_enabled);
         let audio_enabled = Rc::clone(&self.audio_enabled);
         let screen_enabled = Rc::clone(&self.screen_enabled);
-        self.heartbeat = Some(Interval::new(1000, move || {
-            let heartbeat_metadata = HeartbeatMetadata {
-                video_enabled: video_enabled.load(std::sync::atomic::Ordering::Relaxed),
-                audio_enabled: audio_enabled.load(std::sync::atomic::Ordering::Relaxed),
-                screen_enabled: screen_enabled.load(std::sync::atomic::Ordering::Relaxed),
-                ..Default::default()
-            };
+        let is_speaking = Rc::clone(&self.is_speaking);
+        let session_id = Rc::clone(&self.session_id);
 
-            let packet = MediaPacket {
-                media_type: MediaType::HEARTBEAT.into(),
-                email: userid.clone(),
-                timestamp: js_sys::Date::now(),
-                heartbeat_metadata: Some(heartbeat_metadata).into(),
-                ..Default::default()
-            };
-            let data = aes.encrypt(&packet.write_to_bytes().unwrap()).unwrap();
-            let packet = PacketWrapper {
-                data,
-                email: userid.clone(),
-                packet_type: PacketType::MEDIA.into(),
-                ..Default::default()
-            };
-            if let Status::Connected = status.get() {
-                task.send_packet(packet);
+        self.heartbeat = Some(Interval::new(HEARTBEAT_KEEPALIVE_INTERVAL_MS, move || {
+            if let Some(packet_wrapper) = build_heartbeat_packet(
+                &userid,
+                &video_enabled,
+                &audio_enabled,
+                &screen_enabled,
+                &is_speaking,
+                &aes,
+                &session_id,
+            ) {
+                if let Status::Connected = status.get() {
+                    // Heartbeats are periodic and expendable — use datagrams
+                    // for lower overhead. A missed heartbeat is harmless; the
+                    // next one arrives within HEARTBEAT_KEEPALIVE_INTERVAL_MS.
+                    task.send_packet_datagram(packet_wrapper);
+                }
             }
         }));
     }
@@ -157,22 +160,89 @@ impl Connection {
         }
     }
 
+    /// Send a packet via datagram (unreliable, low-latency) when supported.
+    ///
+    /// Used for control packets (heartbeats, RTT probes, diagnostics) that are
+    /// periodic and expendable — lower overhead matters more than guaranteed
+    /// delivery. Falls back to reliable stream for WebSocket connections or
+    /// oversized packets.
+    pub fn send_packet_datagram(&self, packet: PacketWrapper) {
+        if let Status::Connected = self.status.get() {
+            self.task.send_packet_datagram(packet);
+        }
+    }
+
     pub fn set_video_enabled(&self, enabled: bool) {
-        log::debug!("Setting video enabled to {enabled}");
-        self.video_enabled
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let prev = self
+            .video_enabled
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed);
+        if prev != enabled {
+            log::debug!("Video enabled changed: {prev} -> {enabled}");
+            self.send_immediate_heartbeat();
+        }
     }
 
     pub fn set_audio_enabled(&self, enabled: bool) {
-        log::debug!("Setting audio enabled to {enabled}");
-        self.audio_enabled
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let prev = self
+            .audio_enabled
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed);
+        if prev != enabled {
+            log::debug!("Audio enabled changed: {prev} -> {enabled}");
+            self.send_immediate_heartbeat();
+        }
     }
 
     pub fn set_screen_enabled(&self, enabled: bool) {
-        log::debug!("Setting screen enabled to {enabled}");
-        self.screen_enabled
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let prev = self
+            .screen_enabled
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed);
+        if prev != enabled {
+            log::debug!("Screen enabled changed: {prev} -> {enabled}");
+            self.send_immediate_heartbeat();
+        }
+    }
+
+    /// Send a heartbeat packet immediately so peers learn about state changes
+    /// without waiting for the next keepalive heartbeat tick.
+    ///
+    /// Uses datagrams for consistency with the periodic heartbeat path.
+    /// Heartbeats are expendable — a missed immediate heartbeat is followed
+    /// by the next periodic one within HEARTBEAT_KEEPALIVE_INTERVAL_MS.
+    fn send_immediate_heartbeat(&self) {
+        let userid = match self.userid.borrow().as_ref() {
+            Some(id) => id.clone(),
+            None => return, // heartbeat not started yet
+        };
+
+        if !matches!(self.status.get(), Status::Connected) {
+            return;
+        }
+
+        if let Some(packet_wrapper) = build_heartbeat_packet(
+            &userid,
+            &self.video_enabled,
+            &self.audio_enabled,
+            &self.screen_enabled,
+            &self.is_speaking,
+            &self.aes,
+            &self.session_id,
+        ) {
+            self.task.send_packet_datagram(packet_wrapper);
+        }
+    }
+
+    pub fn set_speaking(&self, speaking: bool) {
+        let prev = self
+            .is_speaking
+            .swap(speaking, std::sync::atomic::Ordering::Relaxed);
+        if prev != speaking {
+            log::debug!("Speaking changed: {prev} -> {speaking}");
+            self.send_immediate_heartbeat();
+        }
+    }
+
+    pub fn set_session_id(&self, session_id: u64) {
+        *self.session_id.borrow_mut() = Some(session_id);
     }
 }
 
@@ -181,6 +251,66 @@ impl Drop for Connection {
         log::debug!("Dropping Connection to {}", self.url);
         self.stop_heartbeat();
     }
+}
+
+fn build_heartbeat_packet(
+    userid: &str,
+    video_enabled: &AtomicBool,
+    audio_enabled: &AtomicBool,
+    screen_enabled: &AtomicBool,
+    is_speaking: &AtomicBool,
+    aes: &Aes128State,
+    session_id: &RefCell<Option<u64>>,
+) -> Option<PacketWrapper> {
+    let heartbeat_metadata = HeartbeatMetadata {
+        video_enabled: video_enabled.load(std::sync::atomic::Ordering::Relaxed),
+        audio_enabled: audio_enabled.load(std::sync::atomic::Ordering::Relaxed),
+        screen_enabled: screen_enabled.load(std::sync::atomic::Ordering::Relaxed),
+        is_speaking: is_speaking.load(std::sync::atomic::Ordering::Relaxed),
+        ..Default::default()
+    };
+
+    let packet = MediaPacket {
+        media_type: MediaType::HEARTBEAT.into(),
+        user_id: userid.as_bytes().to_vec(),
+        timestamp: js_sys::Date::now(),
+        heartbeat_metadata: Some(heartbeat_metadata).into(),
+        ..Default::default()
+    };
+
+    let data = aes_encrypt_heartbeat(aes, &packet)
+        .map_err(|e| {
+            log::error!("{e}");
+            let _ = videocall_diagnostics::global_sender().try_broadcast(
+                videocall_diagnostics::DiagEvent {
+                    subsystem: "heartbeat",
+                    stream_id: None,
+                    ts_ms: videocall_diagnostics::now_ms(),
+                    metrics: vec![videocall_diagnostics::metric!("encryption_failure", 1u64)],
+                },
+            );
+        })
+        .ok()?;
+    let mut packet_wrapper = PacketWrapper {
+        data,
+        user_id: userid.as_bytes().to_vec(),
+        packet_type: PacketType::MEDIA.into(),
+        ..Default::default()
+    };
+
+    if let Some(sid) = session_id.borrow().as_ref() {
+        packet_wrapper.session_id = *sid;
+    }
+
+    Some(packet_wrapper)
+}
+
+fn aes_encrypt_heartbeat(aes: &Aes128State, packet: &MediaPacket) -> Result<Vec<u8>, String> {
+    let bytes = packet
+        .write_to_bytes()
+        .map_err(|e| format!("Failed to serialize heartbeat packet: {e}"))?;
+    aes.encrypt(&bytes)
+        .map_err(|e| format!("Failed to encrypt heartbeat packet: {e:?}"))
 }
 
 fn tap_callback<IN: 'static, OUT: 'static>(

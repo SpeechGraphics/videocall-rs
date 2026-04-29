@@ -16,19 +16,41 @@
  * conditions.
  */
 
+pub mod callback;
+pub mod feature_flags;
 pub mod protos;
+pub mod user_id;
+pub mod validation;
 
+pub use callback::Callback;
+pub use feature_flags::FeatureFlags;
 use protobuf::Message;
-use yew_websocket::websocket::{Binary, Text};
+pub use user_id::{is_system_user, to_user_id_bytes, user_id_bytes_to_string};
+
+/// A representation of a value which can be stored and restored as a text.
+pub type Text = Result<String, anyhow::Error>;
+
+/// A representation of a value which can be stored and restored as a binary.
+pub type Binary = Result<Vec<u8>, anyhow::Error>;
+
+/// System user ID used for server-generated messages (meeting info, meeting started/ended).
+/// This is not a real user and should be filtered out in UI/peer management.
+pub const SYSTEM_USER_ID: &str = "system-&^%$#@!";
 
 impl std::fmt::Display for protos::media_packet::media_packet::MediaType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            protos::media_packet::media_packet::MediaType::MEDIA_TYPE_UNKNOWN => {
+                write!(f, "UNKNOWN")
+            }
             protos::media_packet::media_packet::MediaType::AUDIO => write!(f, "audio"),
             protos::media_packet::media_packet::MediaType::VIDEO => write!(f, "video"),
             protos::media_packet::media_packet::MediaType::SCREEN => write!(f, "screen"),
             protos::media_packet::media_packet::MediaType::HEARTBEAT => write!(f, "heartbeat"),
             protos::media_packet::media_packet::MediaType::RTT => write!(f, "rtt"),
+            protos::media_packet::media_packet::MediaType::KEYFRAME_REQUEST => {
+                write!(f, "keyframe_request")
+            }
         }
     }
 }
@@ -36,6 +58,9 @@ impl std::fmt::Display for protos::media_packet::media_packet::MediaType {
 impl std::fmt::Display for protos::packet_wrapper::packet_wrapper::PacketType {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            protos::packet_wrapper::packet_wrapper::PacketType::PACKET_TYPE_UNKNOWN => {
+                write!(f, "UNKNOWN")
+            }
             protos::packet_wrapper::packet_wrapper::PacketType::AES_KEY => write!(f, "AES_KEY"),
             protos::packet_wrapper::packet_wrapper::PacketType::RSA_PUB_KEY => {
                 write!(f, "RSA_PUB_KEY")
@@ -49,6 +74,15 @@ impl std::fmt::Display for protos::packet_wrapper::packet_wrapper::PacketType {
             }
             protos::packet_wrapper::packet_wrapper::PacketType::HEALTH => {
                 write!(f, "HEALTH")
+            }
+            protos::packet_wrapper::packet_wrapper::PacketType::MEETING => {
+                write!(f, "MEETING")
+            }
+            protos::packet_wrapper::packet_wrapper::PacketType::SESSION_ASSIGNED => {
+                write!(f, "SESSION_ASSIGNED")
+            }
+            protos::packet_wrapper::packet_wrapper::PacketType::CONGESTION => {
+                write!(f, "CONGESTION")
             }
         }
     }

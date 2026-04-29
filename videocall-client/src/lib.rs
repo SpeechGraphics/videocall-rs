@@ -25,7 +25,7 @@
 //! The only DOM data it needs is the ID of the `HtmlVideoElement` for the participant's own video
 //! display and the ID's of the `HtmlCanvasElement`s into which remote peer video should be renderered.
 //!
-//! In addition to its use by Rust UI apps (e.g. via yew), it is intended that this crate be
+//! In addition to its use by Rust UI apps (e.g. via Yew, Dioxus, or Leptos), it is intended that this crate be
 //! compiled to npm module that could be called from javascript, e.g. in an electron app.
 //!
 //! Currently, only the Chrome browser is supported, due to some of the Web APIs that are used.
@@ -41,7 +41,7 @@
 //! ## Client creation and connection:
 //! ```no_run
 //! use videocall_client::{VideoCallClient, VideoCallClientOptions};
-//! use yew::Callback;
+//! use videocall_client::Callback;
 //!
 //! let options = VideoCallClientOptions {
 //!     enable_e2ee: true,
@@ -50,7 +50,7 @@
 //!     on_peer_first_frame: Callback::noop(),
 //!     get_peer_video_canvas_id: Callback::from(|_| "video-canvas".to_string()),
 //!     get_peer_screen_canvas_id: Callback::from(|_| "screen-canvas".to_string()),
-//!     userid: "user123".to_string(),
+//!     user_id: "user123".to_string(),
 //!     meeting_id: "room456".to_string(),
 //!     websocket_urls: vec!["ws://localhost:8080".to_string()],
 //!     webtransport_urls: vec!["https://localhost:8443".to_string()],
@@ -64,6 +64,17 @@
 //!     rtt_probe_interval_ms: None,
 //!     health_reporting_interval_ms: Some(5000), // Send health every 5 seconds
 //!     on_peer_removed: None,
+//!     on_meeting_info: None,
+//!     on_meeting_ended: None,
+//!     on_speaking_changed: None,
+//!     on_audio_level_changed: None,
+//!     vad_threshold: None,
+//!     on_meeting_activated: None,
+//!     on_participant_admitted: None,
+//!     on_participant_rejected: None,
+//!     on_waiting_room_updated: None,
+//!     on_peer_left: None,    // Option<Callback<(String, String)>> -- (display_name, user_id)
+//!     on_peer_joined: None,  // Option<Callback<(String, String)>> -- (display_name, user_id)
 //! };
 //! let mut client = VideoCallClient::new(options);
 //!
@@ -73,36 +84,52 @@
 //! ## Encoder creation:
 //! ```no_run
 //! use videocall_client::{VideoCallClient, CameraEncoder, ScreenEncoder, create_microphone_encoder};
-//! use yew::Callback;
+//! use videocall_client::Callback;
 //!
 //! # use videocall_client::VideoCallClientOptions;
 //! # let options = VideoCallClientOptions {
 //! #     enable_e2ee: false, enable_webtransport: false, on_peer_added: Callback::noop(),
 //! #     on_peer_first_frame: Callback::noop(), get_peer_video_canvas_id: Callback::from(|_| "video".to_string()),
-//! #     get_peer_screen_canvas_id: Callback::from(|_| "screen".to_string()), userid: "user".to_string(),
+//! #     get_peer_screen_canvas_id: Callback::from(|_| "screen".to_string()), user_id: "user".to_string(),
 //! #     meeting_id: "room".to_string(), websocket_urls: vec![], webtransport_urls: vec![],
 //! #     on_connected: Callback::noop(), on_connection_lost: Callback::noop(), enable_diagnostics: false, diagnostics_update_interval_ms: None,
 //! #     enable_health_reporting: false, health_reporting_interval_ms: None, on_encoder_settings_update: None,
 //! #     rtt_testing_period_ms: 3000, rtt_probe_interval_ms: None,
 //! #     on_peer_removed: None,
+//! #     on_meeting_info: None,
+//! #     on_meeting_ended: None,
+//! #     on_speaking_changed: None,
+//! #     on_audio_level_changed: None,
+//! #     vad_threshold: None,
+//! #     on_meeting_activated: None,
+//! #     on_participant_admitted: None,
+//! #     on_participant_rejected: None,
+//! #     on_waiting_room_updated: None,
+//! #     on_peer_left: None,
+//! #     on_peer_joined: None,
 //! # };
 //! # let client = VideoCallClient::new(options);
 //! let mut camera = CameraEncoder::new(
 //!     client.clone(),
 //!     "video-element",
 //!     1000000, // 1 Mbps initial bitrate
-//!     Callback::noop()
+//!     Callback::noop(),
+//!     Callback::noop() // on_error callback for camera errors
 //! );
 //! let mut microphone = create_microphone_encoder(
 //!     client.clone(),
 //!     128, // 128 kbps bitrate
 //!     Callback::noop(),
 //!     Callback::noop(),
+//!     None, // vad_threshold
+//!     Some(camera.shared_audio_tier_bitrate()),
+//!     Some(camera.shared_audio_tier_fec()),
 //! );
 //! let mut screen = ScreenEncoder::new(
 //!     client,
 //!     2000, // 2 Mbps bitrate
-//!     Callback::noop()
+//!     Callback::noop(),
+//!     Callback::noop() // on_state_change callback for screen share events
 //! );
 //!
 //! // Select devices and start/stop encoding
@@ -120,14 +147,11 @@
 //!
 //! ```no_run
 //! use videocall_client::MediaDeviceAccess;
-//! use yew::Callback;
+//! use videocall_client::Callback;
 //!
 //! let mut media_device_access = MediaDeviceAccess::new();
-//! media_device_access.on_granted = Callback::from(|_| {
-//!     web_sys::console::log_1(&"Access granted!".into());
-//! });
-//! media_device_access.on_denied = Callback::from(|error| {
-//!     web_sys::console::log_2(&"Access denied:".into(), &error);
+//! media_device_access.on_result = Callback::from(|_| {
+//!     web_sys::console::log_1(&"Status of access".into());
 //! });
 //! media_device_access.request();
 //! ```
@@ -135,7 +159,7 @@
 //! ### Device query and listing:
 //! ```no_run
 //! use videocall_client::MediaDeviceList;
-//! use yew::Callback;
+//! use videocall_client::Callback;
 //!
 //! let mut media_device_list = MediaDeviceList::new();
 //! media_device_list.audio_inputs.on_selected = Callback::from(|device_id: String| {
@@ -158,7 +182,9 @@
 //!
 //! ```
 
+pub mod adaptive_quality_constants;
 pub mod audio;
+pub mod audio_constants;
 pub mod audio_worklet_codec;
 mod client;
 mod connection;
@@ -172,8 +198,16 @@ mod media_devices;
 pub mod utils;
 mod wrappers;
 pub use client::{VideoCallClient, VideoCallClientOptions};
+pub use connection::ConnectionState;
 pub use decode::{
     create_audio_peer_decoder, AudioPeerDecoderTrait, PeerDecodeManager, VideoPeerDecoder,
 };
-pub use encode::{create_microphone_encoder, CameraEncoder, MicrophoneEncoderTrait, ScreenEncoder};
-pub use media_devices::{MediaDeviceAccess, MediaDeviceList, SelectableDevices};
+pub use encode::{
+    create_microphone_encoder, CameraEncoder, MicrophoneEncoderTrait, ScreenEncoder,
+    ScreenShareEvent,
+};
+pub use media_devices::{
+    MediaAccessKind, MediaDeviceAccess, MediaDeviceList, MediaPermission,
+    MediaPermissionsErrorState, PermissionState, SelectableDevices,
+};
+pub use videocall_types::Callback;

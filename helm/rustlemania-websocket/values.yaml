@@ -7,7 +7,7 @@ fullnameOverride: ""
 
 replicaCount: 1
 image:
-  repository: securityunion/rustlemania-api
+  repository: securityunion/videocall-media-server
   pullPolicy: Always
   tag: high-availability-cf63fcce
 env:
@@ -19,19 +19,22 @@ env:
     value: https://rustlemania.com
   - name: NATS_URL
     value: nats:4222
-  - name: DATABASE_ENABLED
-    value: "false"
-  - name: DATABASE_URL
-    value: abc
   - name: TOKIO_WORKER_THREADS
     value: "1"  # Default for WebSocket services - adjust per region as needed
+  # JWT_SECRET must match the secret used by meeting-api to sign room access tokens.
+  # Create the secret with: kubectl create secret generic jwt-secret --from-literal=secret=<value>
+  - name: JWT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: jwt-secret
+        key: secret
 resources:
   limits:
-    cpu: "50m"
-    memory: "10Mi"
+    cpu: "500m"
+    memory: "256Mi"
   requests:
-    cpu: "20m"
-    memory: "10Mi"
+    cpu: "100m"
+    memory: "32Mi"
 podAnnotations: {}
 podSecurityContext: {}
 securityContext: {}

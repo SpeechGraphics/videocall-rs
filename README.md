@@ -1,12 +1,29 @@
 # videocall.rs
 
+<a href="https://crates.io/crates/videocall-cli"><img src="https://img.shields.io/crates/v/videocall-cli.svg" alt="Crates.io (videocall-cli)" height="28"></a>
 <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" height="28"></a>
 <a href="https://discord.gg/JP38NRe4CJ"><img src="https://img.shields.io/badge/Discord-Join%20Chat-7289DA?logo=discord&logoColor=white" alt="Discord" height="28"></a> 
 <a href="https://www.digitalocean.com/?refcode=6de4e19c5193&utm_campaign=Referral_Invite&utm_medium=Referral_Program&utm_source=badge"><img src="https://web-platforms.sfo2.cdn.digitaloceanspaces.com/WWW/Badge%201.svg" alt="DigitalOcean Referral Badge" height="28"></a>
 
-An open-source, high-performance video conferencing platform built with Rust, providing real-time communication with low latency.
+An open-source, ultra-low-latency video conferencing platform and API built with Rust. Designed for software professionals, robotics, and embedded systems, it supports WebTransport with WebSocket fallback for high-performance real-time communication.
 
 **[Website](https://videocall.rs)** | **[Discord Community](https://discord.gg/JP38NRe4CJ)**
+
+## ⚡ Quick Links
+
+- **[Documentation](https://docs.videocall.rs)** - Comprehensive guides and API reference.
+- **[Crates.io](https://crates.io/crates/videocall-cli)** - Download the CLI tool.
+- **[Report a Bug](https://github.com/security-union/videocall-rs/issues)** - Help us improve.
+
+## 🌟 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=security-union/videocall-rs&type=Date)](https://star-history.com/#security-union/videocall-rs&Date)
+
+## Who is this for?
+
+- **Software Professionals:** Build custom video applications with a modern, type-safe Rust API.
+- **Robotics & IoT Engineers:** Stream ultra-low-latency video from drones, robots, and embedded devices (Raspberry Pi, Jetson Nano) using our lightweight CLI and SDKs.
+- **Privacy Advocates:** Self-host your own video conferencing infrastructure with secure JWT authentication and SSO support.
 
 ## Table of Contents
 
@@ -18,14 +35,21 @@ An open-source, high-performance video conferencing platform built with Rust, pr
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Docker Setup](#docker-setup)
+  - [Nix Build System (WIP)](#nix-build-system-wip)
   - [Manual Setup](#manual-setup)
 - [Runtime Configuration](#runtime-configuration-frontend-configjs)
-  - [Local (no Docker)](#local-no-docker-create-yew-uiscriptsconfigjs)
-  - [Local/Docker](#localdocker-start-yewsh)
+  - [Local (no Docker)](#local-no-docker-create-dioxus-uiscriptsconfigjs)
+  - [Local/Docker](#localdocker-start-dioxussh)
   - [Kubernetes/Helm](#kuberneteshelm-configmap-configjsyaml)
 - [Usage](#usage)
+- [Meeting Management](#meeting-management)
 - [Performance](#performance)
 - [Security](#security)
+- [Feature Flags](#feature-flags)
+- [Testing](#testing)
+  - [UI Testing (dioxus-ui)](#ui-testing-dioxus-ui)
+  - [Backend Testing (actix-api)](#backend-testing-actix-api)
+  - [E2E Testing (Playwright)](#e2e-testing-playwright)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Project Structure](#project-structure)
@@ -35,19 +59,19 @@ An open-source, high-performance video conferencing platform built with Rust, pr
 
 ## Overview
 
-videocall.rs is a modern, open-source video conferencing system written entirely in Rust, designed for developers who need reliable, scalable, and secure real-time communication capabilities. It provides a foundation for building custom video communication solutions, with support for both browser-based and native clients.
+videocall.rs is a modern, open-source video conferencing system written entirely in Rust. It is designed for software professionals and robotics engineers who need reliable, scalable, and secure real-time communication capabilities. It provides a robust foundation for building custom video communication solutions, from web apps to autonomous vehicle feeds, with support for both browser-based and native clients.
 
 **Project Status:** Beta - Actively developed and suitable for non-critical production use
 
 ## Features
 
-- **High Performance:** Built with Rust for optimal resource utilization and low latency
-- **Multiple Transport Protocols:** Support for WebSockets and WebTransport 
-- **End-to-End Encryption (E2EE):** Optional secure communications between peers
-- **Scalable Architecture:** Designed with a pub/sub model using NATS for horizontal scaling
-- **Cross-Platform Support:** Chromium-based browsers and Safari supported
-- **Native Client Support:** CLI tool for headless video streaming from devices like Raspberry Pi
-- **Open Source:** MIT licensed for maximum flexibility
+- **Ultra-Low Latency:** Built with Rust for sub-100ms latency, ideal for robotics and real-time control.
+- **Multiple Transport Protocols:** WebTransport with automatic WebSocket fallback for maximum compatibility.
+- **Secure Authentication:** JWT-based access control with SSO/OAuth support.
+- **Scalable Architecture:** Designed with a pub/sub model using NATS for horizontal scaling (Mesh/SFU hybrid).
+- **Cross-Platform Support:** Chromium-based browsers and Safari supported.
+- **Robotics & Embedded:** High-performance CLI and SDK for headless streaming from Raspberry Pi, Jetson Nano, and other embedded Linux devices.
+- **Open Source:** MIT licensed for maximum flexibility.
 
 ## Compatibility
 
@@ -102,7 +126,7 @@ graph TD
 ```
 
 1. **actix-api:** Rust-based backend server using Actix Web framework
-2. **yew-ui:** Web frontend built with the Yew framework and compiled to WebAssembly
+2. **dioxus-ui:** Web frontend built with the Dioxus framework and compiled to WebAssembly
 3. **videocall-types:** Shared data types and protocol definitions
 4. **videocall-client:** Client library for native integration
 5. **videocall-cli:** Command-line interface for headless video streaming
@@ -120,7 +144,7 @@ We strongly recommend using the Docker-based setup for development, as it's well
 
 - Modern Linux distribution, macOS, or Windows 10/11
 - [Docker](https://docs.docker.com/engine/install/) and Docker Compose (for containerized setup)
-- [Rust toolchain](https://rustup.rs/) 1.85+ (for manual setup)
+- [Rust toolchain](https://rustup.rs/) 1.89+ (for manual setup)
 - Chromium-based browser (Chrome, Edge, Brave) for frontend access - Firefox is not supported
 - Safari both in iOS and macOS are supported for frontend access
 
@@ -134,20 +158,62 @@ The quickest way to get started is with our Docker-based setup:
    cd videocall-rs
    ```
 
-2. Start the server (replace `<server-ip>` with your machine's IP address):
+2. Create a `.env` file from the sample and fill in your OAuth credentials:
+   ```
+   cp docker/.env-sample .env
+   ```
+   Edit `.env` and set `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET`.
+
+   **Getting Google OAuth credentials:**
+   - Go to [Google Cloud Console → APIs & Credentials](https://console.cloud.google.com/apis/credentials)
+   - Create an OAuth 2.0 Client ID (Web application type)
+   - Add `http://localhost:8081/login/callback` as an Authorized redirect URI
+   - Copy the Client ID and Secret into your `.env`
+
+   > **Note:** `make up` will auto-create `.env` from the sample if it does not exist, but you must still edit it to add your credentials before the app will work.
+
+3. Start the stack:
    ```
    make up
    ```
-
-3. Open Chrome using the provided script for local WebTransport:
-   ```
-   ./launch_chrome.sh
-   ```
+   The first run compiles Rust/WASM inside the containers — this takes several minutes. Watch the `dioxus-ui` logs; it's ready when Trunk prints `server listening on http://0.0.0.0:<port>`.
 
 4. Access the application at:
    ```
-   http://<server-ip>/meeting/<username>/<meeting-id>
+   http://localhost
    ```
+   Then navigate to a meeting: `http://localhost/meeting/<username>/<meeting-id>`
+
+**Platform notes:**
+
+- **Rancher Desktop (Windows/WSL2) with Traefik Ingress on port 3001:** Rancher Desktop runs Traefik which may conflict with the dioxus-ui frontend. Override the port in your local `.env` (not `.env-sample`):
+  ```
+  DIOXUS_SERVE_PORT=8088
+  AFTER_LOGIN_URL=http://localhost:8088
+  ALLOWED_REDIRECT_URLS=http://localhost:8088
+  ```
+  Then access the app at `http://localhost:8088`.
+- **Shell environment variables:** If you have `API_BASE_URL`, `OAUTH_REDIRECT_URL`, or similar variables exported in your shell profile (`~/.bashrc`, `~/.zshrc`), they will override `.env` values. Remove them from your profile before running `make up`.
+- **Slow first run:** WASM compilation inside Docker can take 5–15 minutes on a cold cache. Subsequent runs reuse the build cache and start in seconds.
+
+### Nix Build System (WIP)
+
+We are migrating the build infrastructure to [Nix](https://nixos.org/) for reproducible, fast builds. Currently the `leptos-website` is the first component being nixified.
+
+**Status:** Work in progress — see the `nixify-docker-build` branch.
+
+**What Nix replaces:** Previously, Docker builds spent 15-20 minutes compiling tools like `cargo-leptos` and `wasm-bindgen-cli` from source on every build. Nix provides these as pre-built binaries from the binary cache, reducing tool setup from minutes to seconds.
+
+**What's done so far:**
+- `flake.nix` at the repo root provides dev shells with pinned versions of the Rust nightly toolchain, `cargo-leptos`, `wasm-bindgen-cli`, `binaryen`, Node.js, and system dependencies
+- `docker/Dockerfile.website` and `docker/Dockerfile.website.dev` use `nixos/nix` as a builder image
+- `.github/workflows/leptos-website-build.yaml` uses `DeterminateSystems/nix-installer-action` with `magic-nix-cache-action` for cached CI builds
+
+**Quick start (requires [Nix](https://install.determinate.systems/nix)):**
+
+The integration is transparent to the user, and the development experience is the same as with Docker.
+
+**What's next:** Nixifying additional components (actix-api, dioxus-ui) and evaluating [crane](https://github.com/ipetkov/crane) for full Nix-managed Rust dependency caching.
 
 ### Manual Setup (Experimental)
 
@@ -184,24 +250,44 @@ For detailed configuration options, see our [setup documentation](https://docs.v
 
 ## Runtime Configuration (Frontend config.js)
 
-The Yew UI is configured at runtime via a `window.__APP_CONFIG` object provided by a `config.js` file. The file is copied by Trunk and loaded at `/config.js` by `yew-ui/index.html`.
+The frontend is configured at runtime via a `window.__APP_CONFIG` object provided by a `config.js` file. The file is copied by Trunk and loaded at `/config.js` by `dioxus-ui/index.html`.
 
-### Local (no Docker): create yew-ui/scripts/config.js
+### Local (no Docker): create dioxus-ui/scripts/config.js
 
 - Start services with `./start_dev.sh`.
-- Create `yew-ui/scripts/config.js` that assigns `window.__APP_CONFIG = Object.freeze({...})`.
+- Create `dioxus-ui/scripts/config.js` that assigns `window.__APP_CONFIG = Object.freeze({...})`.
 - Keep the keys in sync with the authoritative sources below. Trunk will copy the file and the app will pick it up on refresh.
-- Tip: `mkdir -p yew-ui/scripts` to ensure the directory exists.
+- Tip: `mkdir -p dioxus-ui/scripts` to ensure the directory exists.
 
-Authoritative keys and defaults: see `docker/start-yew.sh` and the Helm template referenced below.
+Authoritative keys and defaults: see `docker/start-dioxus.sh` and the Helm template referenced below.
 
-### Local/Docker: start-yew.sh
+### Voice Activity Detection (VAD) Threshold
 
-`docker/start-yew.sh` generates `/app/yew-ui/scripts/config.js` from environment variables at container startup. For the current list of supported variables and defaults, refer directly to `docker/start-yew.sh`. Restart the container to apply changes.
+The `vadThreshold` config parameter controls how sensitive the speaking detection is. It sets the minimum RMS audio level that counts as "speaking" — used for tile border glow, peer list mic glow, and self-video glow indicators.
+
+```javascript
+window.__APP_CONFIG = Object.freeze({
+    // ... other config ...
+    vadThreshold: 0.02   // default
+});
+```
+
+| Value | Sensitivity | Use case |
+|-------|-------------|----------|
+| `0.01` | High — picks up quiet speech and background noise | Quiet environments, soft speakers |
+| `0.02` | Medium (default) — good balance for most setups | General use |
+| `0.05` | Low — only triggers on louder speech | Noisy environments, reduces false positives |
+| `0.10` | Very low — requires loud/close speech | Very noisy environments |
+
+The threshold can also be set via the `VAD_THRESHOLD` environment variable when running in Docker (see `docker/start-dioxus.sh`), or via `runtimeConfig.vadThreshold` in Helm values.
+
+### Local/Docker: start-dioxus.sh
+
+`docker/start-dioxus.sh` generates `/app/dioxus-ui/scripts/config.js` from environment variables at container startup. For the current list of supported variables and defaults, refer directly to `docker/start-dioxus.sh`. Restart the container to apply changes.
 
 ### Kubernetes/Helm: configmap-configjs.yaml
 
-`helm/rustlemania-ui/templates/configmap-configjs.yaml` renders `config.js` from `.Values.runtimeConfig`. Define `runtimeConfig` in your values file and deploy/upgrade. For the exact structure and latest behavior, refer to the template itself.
+`helm/videocall-ui/templates/configmap-configjs.yaml` renders `config.js` from `.Values.runtimeConfig`. Define `runtimeConfig` in your values file and deploy/upgrade. For the exact structure and latest behavior, refer to the template itself.
 
  
 
@@ -239,6 +325,45 @@ videocall-cli stream \
 
 For detailed information about the CLI tool and all available options, see the [videocall-cli README](videocall-cli/README.md).
 
+## Meeting Management
+
+videocall.rs includes a comprehensive meeting management system with ownership, waiting rooms, and host controls.
+
+### Key Features
+
+- **Meeting Ownership**: Each meeting has an owner (the creator) identified by their email
+- **My Meetings**: Users can view and manage all meetings they own from the home page
+- **Waiting Room**: Non-owners enter a waiting room and must be admitted by an existing participant
+- **Host Identification**: The meeting owner is visually identified with "(Host)" in the UI
+- **Soft Delete**: Owners can delete their meetings; deleted meeting IDs can be reused
+
+### Meeting Workflow
+
+1. **Create/Join**: Navigate to `/meeting/{meeting-id}` - if the meeting doesn't exist, you become the owner
+2. **Start/Join Button**: Owners see "Start Meeting", others see "Join Meeting"
+3. **Waiting Room**: Non-owners wait for admission; admitted participants can manage the waiting room
+4. **Auto-Join**: When admitted from the waiting room, participants automatically enter the meeting
+
+### Documentation
+
+For detailed information about the meeting system:
+
+- **[Meeting Ownership & Workflow](docs/MEETING_OWNERSHIP.md)** - Ownership model, lifecycle, and user workflows
+- **[Meeting API Reference](docs/MEETING_API.md)** - Complete API endpoint documentation
+
+### Enabling Meeting Management
+
+Meeting management requires the `FEATURE_MEETING_MANAGEMENT` flag:
+
+```bash
+export FEATURE_MEETING_MANAGEMENT=true
+```
+
+Or in Docker:
+```bash
+docker run -e FEATURE_MEETING_MANAGEMENT=true ...
+```
+
 ## Performance
 
 videocall.rs has been benchmarked and optimized for the following scenarios:
@@ -271,19 +396,122 @@ Performance metrics and tuning guidelines will be available in our [performance 
 Security is a core focus of videocall.rs:
 
 - **Transport Security:** All communications use TLS/HTTPS.
-- **End-to-End Encryption:** Optional E2EE between peers with no server access to content.
-- **Authentication:** Flexible integration with identity providers.
+- **Authentication:** Flexible integration with identity providers (SSO/OAuth).
 - **Access Controls:** Fine-grained permission system for meeting rooms.
 
 For details on our security model and best practices, see our [security documentation](https://docs.videocall.rs/security).
+
+## Feature Flags
+
+videocall.rs uses environment-based feature flags to enable or disable experimental or optional functionality at runtime. Flags are loaded lazily on first access and can be overridden for testing purposes.
+
+### Configuration
+
+Feature flags are set via environment variables with the `FEATURE_` prefix:
+
+```bash
+# Enable a feature flag
+export FEATURE_MEETING_MANAGEMENT=true
+
+# Or when running with Docker
+docker run -e FEATURE_MEETING_MANAGEMENT=true ...
+```
+
+### Available Flags
+
+| Flag | Environment Variable | Description | Default |
+|------|---------------------|-------------|---------|
+| Meeting Management | `FEATURE_MEETING_MANAGEMENT` | Enable meeting lifecycle management including creation, tracking, and host controls | `false` |
+
+### Truthy Values
+
+The following values are recognized as enabling a flag (case-insensitive):
+- `true`
+- `1`
+- `yes`
+
+Any other value (or unset variable) is treated as `false`.
+
+## Testing
+
+### UI Testing (dioxus-ui)
+
+The Dioxus frontend uses a three-layer testing pyramid, all running in a real
+browser via `wasm-bindgen-test`:
+
+| Layer | What it covers | Example |
+|-------|---------------|---------|
+| **Unit** | `MediaDeviceList` logic — hot-plug, fallback, device switching | `videocall-client/src/media_devices/media_device_list.rs` |
+| **Component** | Isolated Dioxus components with mock `MediaDeviceInfo` objects | `dioxus-ui/tests/device_selector.rs`, `dioxus-ui/tests/video_control_buttons.rs` |
+| **Integration** | Real Chrome fake devices → component rendering end-to-end | `dioxus-ui/tests/device_integration.rs` |
+
+```bash
+# Run UI component tests natively (requires Chrome + chromedriver)
+cd dioxus-ui
+CHROMEDRIVER=$(which chromedriver) cargo test --target wasm32-unknown-unknown
+```
+
+CI runs these tests automatically via `.github/workflows/wasm-test.yaml`.
+For the full testing guide — including how to write new tests, the test harness
+API, and the mock device vs real fake device strategy — see
+**[dioxus-ui/README.md](dioxus-ui/README.md#testing)**.
+
+### Backend Testing (actix-api)
+
+The `actix-api` crate contains unit and integration tests that run against real
+PostgreSQL and NATS instances, spun up via Docker Compose. Tests cover:
+
+- **Session management** — meeting creation, multi-user join/leave, host
+  controls, system email rejection
+- **WebSocket transport** — full meeting lifecycle over WebSocket connections
+- **WebTransport** — meeting lifecycle over QUIC/HTTP3
+- **Packet handling** — classification of empty, garbage, and RTT packets
+- **Metrics server** — session tracking, health metrics export, stale session
+  cleanup, concurrent access
+- **Feature flags** — behavior with `FEATURE_MEETING_MANAGEMENT` on and off
+
+Tests use `#[serial_test::serial]` because they share a database, and each test
+cleans up its own data. The infrastructure is defined in
+`docker/docker-compose.integration.yaml`, which provides:
+
+| Service | Purpose |
+|---------|---------|
+| `postgres:12` | Database for meetings and sessions |
+| `nats:2.10-alpine` | Message broker with JetStream |
+| `rust-tests` | Test runner (runs `dbmate` migrations, then `cargo test`) |
+
+```bash
+# Build + run all backend tests (PostgreSQL + NATS in Docker)
+make tests_run
+
+# Tear down test containers
+make tests_down
+```
+
+CI runs these tests automatically via `.github/workflows/cargo-test.yaml`,
+triggered on PRs that touch `actix-api/`, `videocall-types/`, or `protobuf/`.
+For the full backend testing guide — including test patterns, database cleanup,
+and how to write new tests — see **[actix-api/TESTING.md](actix-api/TESTING.md)**.
+
+### E2E Testing (Playwright)
+
+Full browser-based end-to-end tests using [Playwright](https://playwright.dev/).
+Tests run against the **Dioxus UI**, verifying meeting flows with real browsers.
+Authentication is bypassed via JWT cookie injection — no OAuth setup needed.
+
+The E2E stack is defined in `docker/docker-compose.e2e.yaml` and uses the same
+Nix-based dev Dockerfiles as CI. Tests run automatically on pushes to `main` and
+can be triggered manually from the GitHub Actions page.
+
+See the `e2e-*` targets in the `Makefile` for available commands.
 
 ## Roadmap
 
 | Version | Target Date | Key Features |
 |---------|------------|--------------|
-| 0.5.0   | Q2 2023    | ✅ End-to-End Encryption |
 | 0.6.0   | Q3 2023    | ✅ Safari Browser Support |
 | 0.7.0   | Q4 2023    | ✅ Native Mobile SDKs |
+| 0.5.0   | Q2 2023    | ✅ JWT Authentication & SSO |
 | 0.8.0   | Q1 2024    | 🔄 Screen Sharing Improvements |
 | 1.0.0   | Q2 2024    | 🔄 Production Release with Full API Stability |
 
@@ -306,10 +534,10 @@ See our [Contributing Guidelines](CONTRIBUTING.md) for more detailed information
 ### Technology Stack
 
 - **Backend**: Rust + Actix Web + PostgreSQL + NATS
-- **Frontend**: Rust + Yew + WebAssembly + Tailwind CSS
+- **Frontend**: Rust + Dioxus + WebAssembly + Tailwind CSS
 - **Transport**: WebTransport (QUIC/HTTP3) + WebSockets (fallback)
-- **Build System**: Cargo + Trunk + Docker + Helm
-- **Testing**: Rust test framework + Playwright for E2E tests
+- **Build System**: Cargo + Trunk + Nix (WIP) + Docker + Helm
+- **Testing**: `cargo test` + `wasm-bindgen-test` (browser-based UI tests) + Docker Compose (backend integration)
 
 ### Key Technical Features
 
@@ -398,6 +626,12 @@ These hooks help maintain code quality by ensuring proper formatting and checkin
 <td align="center"><a href="https://github.com/JasterV"><img src="https://avatars3.githubusercontent.com/u/49537445?v=4" width="100" alt=""/><br /><sub><b>Victor Martínez</b></sub></a></td>
 </tr>
 </table>
+
+## Ready to Build?
+
+Start your journey with videocall.rs today. Whether you're building a robot, a drone, or a next-gen video app, we have the tools you need.
+
+[**Get Started with Docker**](#docker-setup) or [**Download the CLI**](https://crates.io/crates/videocall-cli)
 
 ## License
 
