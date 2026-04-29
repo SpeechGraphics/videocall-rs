@@ -41,6 +41,9 @@ pub use statistics::q14;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub mod web;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod neteq_c;
+
 pub use error::{NetEqError, Result};
 pub use neteq::{NetEq, NetEqConfig, NetEqStats, Operation};
 pub use packet::{AudioPacket, RtpHeader};
