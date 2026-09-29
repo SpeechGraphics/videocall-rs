@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/security-union/videocall-rs/compare/neteq-v0.9.0...neteq-v0.9.1) - 2026-08-13
+
+### Added
+
+- pure-Rust VP9 codec (encoder + decoder) — remove C libvpx from videocall-cli & bot ([#884](https://github.com/security-union/videocall-rs/pull/884))
+
+## [0.9.0](https://github.com/security-union/videocall-rs/compare/neteq-v0.8.3...neteq-v0.9.0) - 2026-06-30
+
+### Added
+
+- remove C libopus (audiopus-sys) across the board — pure-Rust ropus codec ([#872](https://github.com/security-union/videocall-rs/pull/872))
+
 ## [0.8.3](https://github.com/security-union/videocall-rs/compare/neteq-v0.8.2...neteq-v0.8.3) - 2026-02-19
 
 ### Other

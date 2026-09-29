@@ -5,6 +5,10 @@ videocall-website:
 
   replicaCount: 1
 
+  # The long-standing main-60f7bea7 rollback pin is gone: it guarded against the
+  # ENOENT crash from a dynamically-linked build (missing /nix ELF interpreter),
+  # and the image is now a static musl binary (nix/images/website.nix). `latest`
+  # must be repopulated by a post-merge publish before this deploys.
   image:
     repository: securityunion/video-call-rs-website
     pullPolicy: Always
