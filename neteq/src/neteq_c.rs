@@ -85,6 +85,10 @@ pub extern "C" fn neteq_get_audio_frame(neteq_ptr: *mut c_void, ret_buf: *mut f3
         log::error!("neteq_get_audio_frame: neteq_ptr is null");
         return;
     }
+    if ret_buf.is_null() {
+        log::error!("neteq_get_audio_frame: ret_buf is null");
+        return;
+    }
     let handle: &mut NetEqHandle = unsafe { &mut *(neteq_ptr as *mut NetEqHandle) };
     let expected = (handle.sample_rate / 100) * handle.channels as u32;
     // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
@@ -114,6 +118,10 @@ pub extern "C" fn neteq_insert_audio_packet(
 ) {
     if neteq_ptr.is_null() {
         log::error!("neteq_insert_audio_packet: neteq_ptr is null");
+        return;
+    }
+    if payload.is_null() {
+        log::error!("neteq_insert_audio_packet: payload is null");
         return;
     }
     let ssrc = 12345;
