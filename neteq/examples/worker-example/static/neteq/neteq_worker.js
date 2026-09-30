@@ -48,7 +48,7 @@ async function init(config) {
 
   initSync(bytes);
   initNetEq();
-  const ne = new WebNetEq(48000, 1, additionalDelayMs);
+  const ne = new WebNetEq({ sampleRate: 48000, channels: 1, additionalDelayMs: additionalDelayMs });
   await ne.init();
   netEq = ne;
 }
