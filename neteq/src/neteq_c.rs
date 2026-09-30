@@ -79,8 +79,14 @@ pub extern "C" fn neteq_destroy(neteq_ptr: *mut c_void) {
 
 // Returns 10ms audio frame of signed float32
 // ret_buf must be (sample_rate/100)*channels*sizeof(float) bytes, per the configured NetEqConfigFfi
+// timestamp_out and seq_no_out are optional (may be null); if non-null, receive the frame's RTP timestamp/sequence number
 #[no_mangle]
-pub extern "C" fn neteq_get_audio_frame(neteq_ptr: *mut c_void, ret_buf: *mut f32) {
+pub extern "C" fn neteq_get_audio_frame(
+    neteq_ptr: *mut c_void,
+    ret_buf: *mut f32,
+    timestamp_out: *mut u32,
+    seq_no_out: *mut u16,
+) {
     if neteq_ptr.is_null() {
         log::error!("neteq_get_audio_frame: neteq_ptr is null");
         return;
@@ -96,12 +102,23 @@ pub extern "C" fn neteq_get_audio_frame(neteq_ptr: *mut c_void, ret_buf: *mut f3
     let frame = handle.neteq.lock().unwrap().get_audio().expect("get_audio");
     let mut m = frame.samples.len();
     if m as u32 != expected {
-        println!("unexpected sample len {}", m);
+        log::warn!("neteq_get_audio_frame: unexpected sample len {m}");
         m = min(m, expected as usize);
     }
     for i in 0..m {
         unsafe {
             *ret_buf.add(i) = frame.samples[i];
+        }
+    }
+
+    if let Some(ref rtp_header) = frame.input_rtp_header {
+        unsafe {
+            if !timestamp_out.is_null() {
+                *timestamp_out = rtp_header.timestamp;
+            }
+            if !seq_no_out.is_null() {
+                *seq_no_out = rtp_header.sequence_number;
+            }
         }
     }
 }
