@@ -26,6 +26,13 @@ struct NetEqHandle {
 
 #[no_mangle]
 pub extern "C" fn neteq_create(config: NetEqConfigFfi) -> *mut c_void {
+    if config.sample_rate < 100 {
+        log::error!(
+            "neteq_create: sample_rate must be >= 100, got {}",
+            config.sample_rate
+        );
+        return std::ptr::null_mut();
+    }
     let neteq_config = NetEqConfig {
         sample_rate: config.sample_rate,
         channels: config.channels,
@@ -61,6 +68,10 @@ pub extern "C" fn neteq_create(config: NetEqConfigFfi) -> *mut c_void {
 
 #[no_mangle]
 pub extern "C" fn neteq_destroy(neteq_ptr: *mut c_void) {
+    if neteq_ptr.is_null() {
+        log::error!("neteq_destroy: neteq_ptr is null");
+        return;
+    }
     unsafe {
         drop(Box::from_raw(neteq_ptr as *mut NetEqHandle));
     }
@@ -70,6 +81,10 @@ pub extern "C" fn neteq_destroy(neteq_ptr: *mut c_void) {
 // ret_buf must be (sample_rate/100)*channels*sizeof(float) bytes, per the configured NetEqConfigFfi
 #[no_mangle]
 pub extern "C" fn neteq_get_audio_frame(neteq_ptr: *mut c_void, ret_buf: *mut f32) {
+    if neteq_ptr.is_null() {
+        log::error!("neteq_get_audio_frame: neteq_ptr is null");
+        return;
+    }
     let handle: &mut NetEqHandle = unsafe { &mut *(neteq_ptr as *mut NetEqHandle) };
     let expected = (handle.sample_rate / 100) * handle.channels as u32;
     // get_audio() appears to handle underflow, whereas neteq_player.rs explicitly
@@ -97,6 +112,10 @@ pub extern "C" fn neteq_insert_audio_packet(
     payload: *mut u8,
     payload_len: u32,
 ) {
+    if neteq_ptr.is_null() {
+        log::error!("neteq_insert_audio_packet: neteq_ptr is null");
+        return;
+    }
     let ssrc = 12345;
     let hdr = RtpHeader::new(sequence_number, timestamp, ssrc, 111, false);
     let vec: Vec<u8>;
