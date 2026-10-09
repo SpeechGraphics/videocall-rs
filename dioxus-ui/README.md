@@ -148,7 +148,7 @@ window.__APP_CONFIG = Object.freeze({
 Or use the Nix devShell (includes all tools):
 
 ```bash
-nix develop .#frontend
+nix-shell default.nix -A shells.frontend
 ```
 
 ### Running Locally
@@ -175,13 +175,11 @@ trunk build --release
 
 Output goes to `dioxus-ui/dist/`.
 
-### Docker (Development)
+### Dev stack
 
 ```bash
-docker compose -f docker/docker-compose.yaml up dioxus-ui
+make dev-ui        # trunk watch mode on :3001 (or `make dev` for the whole stack)
 ```
-
-This mounts the source code and runs Trunk in watch mode.
 
 ## Testing
 
@@ -271,7 +269,7 @@ CHROMEDRIVER=$(which chromedriver) cargo test --target wasm32-unknown-unknown --
 If you use the Nix devShell, all tooling is pre-installed:
 
 ```bash
-nix develop .#frontend
+nix-shell default.nix -A shells.frontend
 cd dioxus-ui
 CHROMEDRIVER=$(which chromedriver) cargo test --target wasm32-unknown-unknown
 ```

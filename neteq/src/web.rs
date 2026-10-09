@@ -26,11 +26,33 @@ use serde::Serialize;
 use serde_wasm_bindgen;
 use wasm_bindgen::prelude::*;
 
+#[wasm_bindgen(typescript_custom_section)]
+const TYPES: &'static str = r#"
+export interface WebNetEqConfig {
+    sampleRate: number;
+    channels: number;
+    maxDelayMs?: number;
+    additionalDelayMs?: number;
+}
+"#;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebNetEqConfig {
+    pub sample_rate: u32,
+    pub channels: u8,
+    #[serde(default)]
+    pub max_delay_ms: Option<u32>,
+    #[serde(default)]
+    pub additional_delay_ms: Option<u32>,
+}
+
 #[wasm_bindgen]
 pub struct WebNetEq {
     neteq: std::cell::RefCell<Option<NetEq>>,
     sample_rate: u32,
     channels: u8,
+    max_delay_ms: u32,
     additional_delay_ms: u32,
 }
 
@@ -46,16 +68,15 @@ struct WebAudioPacket<'a> {
 #[wasm_bindgen]
 impl WebNetEq {
     #[wasm_bindgen(constructor)]
-    pub fn new(
-        sample_rate: u32,
-        channels: u8,
-        additional_delay_ms: u32,
-    ) -> Result<WebNetEq, JsValue> {
+    pub fn new(config: JsValue) -> Result<WebNetEq, JsValue> {
+        let config: WebNetEqConfig = serde_wasm_bindgen::from_value(config)
+            .map_err(|e| JsValue::from_str(&format!("invalid WebNetEqConfig: {e}")))?;
         Ok(WebNetEq {
             neteq: std::cell::RefCell::new(None), // Will be initialized in init()
-            sample_rate,
-            channels,
-            additional_delay_ms,
+            sample_rate: config.sample_rate,
+            channels: config.channels,
+            max_delay_ms: config.max_delay_ms.unwrap_or(0),
+            additional_delay_ms: config.additional_delay_ms.unwrap_or(0),
         })
     }
 
@@ -66,6 +87,7 @@ impl WebNetEq {
         let cfg = NetEqConfig {
             sample_rate: self.sample_rate,
             channels: self.channels,
+            max_delay_ms: self.max_delay_ms,
             additional_delay_ms: self.additional_delay_ms,
             ..Default::default()
         };
