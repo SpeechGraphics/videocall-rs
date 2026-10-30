@@ -18,17 +18,18 @@
 
 use crate::components::Footer::*;
 // use crate::components::Header::*;
-use leptos::*;
+use leptos::prelude::*;
 use leptos_meta::Style;
 
 #[component]
 pub fn Page(children: Children) -> impl IntoView {
     view! {
         <Style>{include_str!("../global.css")}</Style>
-        <div class="min-h-screen text-foreground bg-background overflow-x-hidden">
-            <div class="w-full min-h-[70vh]">
-                {children()}
-            </div>
+        // overflow-x: clip, NOT hidden: `hidden` makes this div a scroll
+        // container, which silently breaks every position:sticky descendant
+        // (nav, the system stack). `clip` clips without creating one.
+        <div class="min-h-screen text-fg bg-bg [overflow-x:clip]">
+            {children()}
             <Footer/>
         </div>
     }

@@ -26,7 +26,7 @@
 mod wasm_worker {
     const AUDIO_PRODUCTION_INTERVAL_MS: i32 = 5;
 
-    use neteq::web::init_net_eq;
+    use neteq::web::{init_net_eq, WebNetEqConfig};
     use neteq::WebNetEq;
     use serde::{Deserialize, Serialize};
     use wasm_bindgen::prelude::*;
@@ -126,7 +126,23 @@ mod wasm_worker {
         // populated.
         NETEQ.with(|cell| {
             if cell.borrow().is_none() {
-                match WebNetEq::new(48_000, 1, 80) {
+                let config = WebNetEqConfig {
+                    sample_rate: 48_000,
+                    channels: 1,
+                    max_delay_ms: None,
+                    additional_delay_ms: Some(80),
+                };
+                let config_js = match serde_wasm_bindgen::to_value(&config) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        console::error_2(
+                            &"[neteq-worker] failed to serialize WebNetEqConfig:".into(),
+                            &e.into(),
+                        );
+                        return;
+                    }
+                };
+                match WebNetEq::new(config_js) {
                     Ok(eq) => {
                         // Spawn async initialization
                         wasm_bindgen_futures::spawn_local(async move {

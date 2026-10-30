@@ -73,4 +73,14 @@ e2e/test-results
 e2e/playwright-report/**
 e2e/node_modules
 e2e/node_modules/**	
+
+# claude code — per-developer state (shared agent definitions in .claude/agents/ stay tracked)
 .claude/worktrees/
+.claude/settings.local.json
+
+# native dev-stack state (make dev)
+.data/
+.env.local
+
+# Rapport
+neteq/include/neteq.h

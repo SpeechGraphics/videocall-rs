@@ -16,7 +16,7 @@
  * conditions.
  */
 
-use leptos::*;
+use leptos::prelude::*;
 
 struct SpeedStat {
     name: String,
@@ -73,7 +73,7 @@ pub fn SpeedStats(shadow: bool, border: bool) -> impl IntoView {
 
     let border_class = if border { "border" } else { "" };
 
-    let labels = vec![
+    let labels = [
         SpeedStat {
             name: String::from("VanillaJS"),
             color: String::from("#A5D6A7"),
